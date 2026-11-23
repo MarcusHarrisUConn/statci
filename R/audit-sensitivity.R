@@ -123,7 +123,9 @@ audit_sensitivity <- function(data,
       suppressWarnings({
         est <- extract(fit_fn(df))
         if (is.null(names(est))) names(est) <- pnames[seq_along(est)]
-        as.numeric(est[pnames])
+        vals <- as.numeric(est[pnames])
+        vals[!is.finite(vals)] <- NA_real_
+        vals
       }),
       error = function(e) rep(NA_real_, length(pnames))
     )
@@ -172,7 +174,9 @@ audit_sensitivity <- function(data,
       df_w <- data
       for (col in numeric_cols) {
         v <- df_w[[col]]
+        if (all(is.na(v))) next
         qs <- stats::quantile(v, probs = c(p, 1 - p), na.rm = TRUE, names = FALSE)
+        if (!all(is.finite(qs))) next
         v[!is.na(v) & v < qs[1L]] <- qs[1L]
         v[!is.na(v) & v > qs[2L]] <- qs[2L]
         df_w[[col]] <- v
@@ -200,7 +204,18 @@ audit_sensitivity <- function(data,
     max_u <- as.integer(max_loo_units)[1L]
     if (!is.null(cluster_col)) {
       units_all <- unique(data[[cluster_col]])
-      if (length(units_all) > max_u) {
+      if (length(units_all) < 2L) {
+        for (j in seq_along(pnames)) {
+          rows[[length(rows) + 1L]] <- tibble::tibble(
+            category = "influence", scenario = "leave_one_cluster_out",
+            parameter = pnames[j], baseline = baseline[j], perturbed = baseline[j],
+            abs_diff = 0, pct_change = 0, sign_flip = FALSE,
+            detail = "Only 1 unique cluster present; LOCO skipped",
+            status = "warn"
+          )
+        }
+        units_use <- character(0)
+      } else if (length(units_all) > max_u) {
         units_use <- sample(units_all, max_u)
       } else {
         units_use <- units_all
@@ -222,6 +237,7 @@ audit_sensitivity <- function(data,
       loo_label <- "leave_one_out"
     }
 
+    if (length(units_use) > 0L) {
     loo_mat <- matrix(NA_real_, nrow = length(units_use), ncol = length(pnames))
     colnames(loo_mat) <- pnames
 
@@ -275,6 +291,7 @@ audit_sensitivity <- function(data,
     }
     if (length(det_rows) > 0L) {
       loo_details <- tibble::as_tibble(do.call(rbind, det_rows))
+    }
     }
   }
 

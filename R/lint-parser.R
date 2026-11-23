@@ -106,11 +106,19 @@ extract_r_chunks <- function(lines, skip_eval_false = FALSE) {
   )
 }
 
-#' Parse inline suppression directives (`# statci-ignore`)
-#' @param lines Character vector of source lines.
+#' Parse inline suppression directives (`# statci-ignore`) from actual AST `<COMMENT>` nodes
+#'
+#' Extracting directives from parsed `<COMMENT>` tokens (rather than raw text)
+#' ensures string literals such as `"# statci-ignore"` can never spoof a
+#' suppression, while strictly scoping directives to their target line.
+#'
+#' @param units Parsed AST units list (`list(xml, line_offset)`).
+#' @param fallback_lines Optional integer vector of line numbers where parsing
+#'   failed and raw comment scanning is permitted.
+#' @param lines Raw source lines (used only for `fallback_lines`).
 #' @return Named list mapping character line numbers to `"*"` or rule ID vectors.
 #' @noRd
-parse_suppressions <- function(lines) {
+parse_suppressions_ast <- function(units, fallback_lines = integer(0), lines = character(0)) {
   sup <- list()
   add_sup <- function(ln_num, rules_vec) {
     key <- as.character(ln_num)
@@ -123,15 +131,16 @@ parse_suppressions <- function(lines) {
     }
   }
 
-  for (i in seq_along(lines)) {
-    ln <- lines[i]
-    if (!grepl("statci-ignore", ln, fixed = TRUE)) next
+  scan_comment <- function(txt, ln_num) {
+    if (!grepl("statci-ignore", txt, fixed = TRUE)) return(invisible(NULL))
 
-    # Match `# statci-ignore-next-line` or `# statci-ignore`
-    m_next <- regexec("#[[:space:]]*statci-ignore-next-line(?:[[:space:]]*:[[:space:]]*([A-Za-z0-9_,[:space:]-]+))?", ln)
-    cap_next <- regmatches(ln, m_next)[[1L]]
+    m_next <- regexec(
+      "^[[:space:]]*#[[:space:]]*statci-ignore-next-line(?:[[:space:]]*:[[:space:]]*([A-Za-z0-9_,[:space:]-]+))?",
+      txt
+    )
+    cap_next <- regmatches(txt, m_next)[[1L]]
     if (length(cap_next) >= 1L && nzchar(cap_next[1L])) {
-      target_line <- i + 1L
+      target_line <- as.integer(ln_num) + 1L
       if (length(cap_next) >= 2L && nzchar(trimws(cap_next[2L]))) {
         rids <- trimws(strsplit(cap_next[2L], ",", fixed = TRUE)[[1L]])
         rids <- rids[nzchar(rids)]
@@ -139,18 +148,38 @@ parse_suppressions <- function(lines) {
       } else {
         add_sup(target_line, "*")
       }
-      next
+      return(invisible(NULL))
     }
 
-    m_cur <- regexec("#[[:space:]]*statci-ignore(?:[[:space:]]*:[[:space:]]*([A-Za-z0-9_,[:space:]-]+))?", ln)
-    cap_cur <- regmatches(ln, m_cur)[[1L]]
+    m_cur <- regexec(
+      "^[[:space:]]*#[[:space:]]*statci-ignore(?:[[:space:]]*:[[:space:]]*([A-Za-z0-9_,[:space:]-]+))?",
+      txt
+    )
+    cap_cur <- regmatches(txt, m_cur)[[1L]]
     if (length(cap_cur) >= 1L && nzchar(cap_cur[1L])) {
       if (length(cap_cur) >= 2L && nzchar(trimws(cap_cur[2L]))) {
         rids <- trimws(strsplit(cap_cur[2L], ",", fixed = TRUE)[[1L]])
         rids <- rids[nzchar(rids)]
-        add_sup(i, rids)
+        add_sup(as.integer(ln_num), rids)
       } else {
-        add_sup(i, "*")
+        add_sup(as.integer(ln_num), "*")
+      }
+    }
+    invisible(NULL)
+  }
+
+  for (u in units) {
+    cm_nodes <- xml2::xml_find_all(u$xml, ".//COMMENT")
+    for (cm in cm_nodes) {
+      scan_comment(xml2::xml_text(cm), ast_line(cm, u$line_offset))
+    }
+  }
+
+  for (fl in fallback_lines) {
+    if (fl >= 1L && fl <= length(lines)) {
+      ln <- lines[fl]
+      if (grepl("^[[:space:]]*#", ln)) {
+        scan_comment(ln, fl)
       }
     }
   }
@@ -202,7 +231,6 @@ parse_lines_to_xml <- function(code_lines) {
 #' @noRd
 build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eval_false = FALSE) {
   if (is.null(lines)) lines <- character(0)
-  suppressions <- parse_suppressions(lines)
 
   if (is_rmd) {
     chunk_info <- extract_r_chunks(lines, skip_eval_false = skip_eval_false)
@@ -217,6 +245,7 @@ build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eva
 
   units <- list()
   parse_errors <- list()
+  fallback_lines <- integer(0)
 
   parsed <- parse_lines_to_xml(code_lines)
   if (is.null(parsed$error)) {
@@ -235,7 +264,11 @@ build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eva
             line_offset = ch$code_start_line - 1L
           )
         }
+      } else if (!isTRUE(ch$eval)) {
+        # Non-evaluated Quarto/Rmd chunks often hold illustrative pseudocode; skip cleanly
+        next
       } else {
+        fallback_lines <- c(fallback_lines, ch$code_start_line)
         parse_errors[[length(parse_errors) + 1L]] <- list(
           line = ch$code_start_line,
           col = 1L,
@@ -253,6 +286,7 @@ build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eva
       err_line <- suppressWarnings(as.integer(caps[2L]))
       if (is.na(err_line)) err_line <- 1L
     }
+    fallback_lines <- c(fallback_lines, err_line)
     parse_errors[[1L]] <- list(
       line = err_line,
       col = 1L,
@@ -260,6 +294,8 @@ build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eva
       message = paste0("R parse error: ", parsed$error)
     )
   }
+
+  suppressions <- parse_suppressions_ast(units, fallback_lines = fallback_lines, lines = lines)
 
   list(
     file = file,
@@ -400,10 +436,10 @@ tail_pos <- function(x) {
   if (length(x) == 0L) NA_integer_ else x[length(x)]
 }
 
-#' Check whether an AST node is nested inside a function(...) definition
+#' Check whether an AST node is nested inside a `function(...)` or `\(...)` definition
 #' @noRd
 ast_is_inside_function <- function(node) {
-  anc <- xml2::xml_find_first(node, "ancestor::expr[FUNCTION]")
+  anc <- xml2::xml_find_first(node, "ancestor::expr[FUNCTION or OP-LAMBDA]")
   !inherits(anc, "xml_missing")
 }
 

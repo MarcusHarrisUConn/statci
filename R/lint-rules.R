@@ -218,6 +218,7 @@ default_rule_ids <- function() {
   c(
     "unseeded_randomness",
     "unsafe_parallel_rng",
+    "duplicate_parallel_seed",
     "preprocessing_before_split",
     "uncentered_mlm_interaction",
     "silent_listwise_mismatch",
@@ -630,8 +631,9 @@ check_silent_listwise_mismatch <- function(ctx) {
   for (u in ctx$units) {
     assigns <- ast_assignments(u$xml, u$line_offset)
     for (a in assigns) {
-      if (any(a$rhs_calls %in% clean_fns) ||
-          grepl("!is\\.na\\(", a$rhs_text)) {
+      has_not_isna <- "is.na" %in% a$rhs_calls &&
+        !inherits(xml2::xml_find_first(a$rhs_node, ".//OP-EXCLAMATION"), "xml_missing")
+      if (any(a$rhs_calls %in% clean_fns) || has_not_isna) {
         cleaned_dfs <- unique(c(cleaned_dfs, a$lhs_root))
       }
       # Check if RHS is a model call
@@ -644,10 +646,10 @@ check_silent_listwise_mismatch <- function(ctx) {
         data_arg <- Filter(function(x) identical(x$name, "data"), margs)
         data_node <- if (length(data_arg) > 0L) data_arg[[1L]]$expr else if (length(margs) >= 2L && is.na(margs[[2L]]$name)) margs[[2L]]$expr else NULL
         na_arg <- Filter(function(x) identical(x$name, "na.action"), margs)
-        has_na_fail <- length(na_arg) > 0L && grepl("na\\.fail", na_arg[[1L]]$text)
+        has_na_fail <- length(na_arg) > 0L && !is.null(na_arg[[1L]]$expr) &&
+          ("na.fail" %in% c(ast_symbols(na_arg[[1L]]$expr), ast_fn_calls_in(na_arg[[1L]]$expr)))
         data_calls <- if (!is.null(data_node)) ast_fn_calls_in(data_node) else character(0)
-        data_inline_clean <- any(data_calls %in% clean_fns) ||
-          (!is.null(data_node) && grepl("complete\\.cases|na\\.omit|drop_na", xml2::xml_text(data_node)))
+        data_inline_clean <- any(data_calls %in% clean_fns)
         data_syms <- if (!is.null(data_node)) ast_symbols(data_node) else character(0)
         data_root <- if (length(data_syms) >= 1L) data_syms[1L] else NA_character_
         form_vars <- if (!is.null(form_node)) sort(unique(ast_symbols(form_node))) else character(0)
@@ -910,10 +912,11 @@ check_unadjusted_multiple_testing <- function(ctx) {
   has_hyp_test <- function(body_node) {
     calls <- ast_fn_calls_in(body_node)
     if (any(calls %in% test_fns)) return(TRUE)
-    txt <- xml2::xml_text(body_node)
-    if (any(calls %in% c("lm", "glm", "lmer", "glmer", "summary")) &&
-        grepl("p\\.value|Pr\\(>\\|[tz]\\|\\)", txt)) {
-      return(TRUE)
+    if (any(calls %in% c("lm", "glm", "lmer", "glmer", "summary"))) {
+      dollar_p <- xml2::xml_find_all(body_node, ".//expr[OP-DOLLAR]/SYMBOL[text()='p.value']")
+      sub_strs <- xml2::xml_text(xml2::xml_find_all(body_node, ".//expr[OP-LEFT-BRACKET or LBB]//STR_CONST"))
+      has_sub_p <- any(grepl("^['\"](p\\.value|Pr\\(>\\|[tz]\\|\\))['\"]$", sub_strs))
+      if (length(dollar_p) > 0L || has_sub_p) return(TRUE)
     }
     FALSE
   }
@@ -948,22 +951,38 @@ check_unadjusted_multiple_testing <- function(ctx) {
   findings
 }
 
-# 9. missing_convergence_check
+# 9. missing_convergence_check (pure AST: immune to comments/string spoofing)
 check_missing_convergence_check <- function(ctx) {
   mlm_opt_fns <- c("lmer", "glmer", "nlmer")
   optim_fns <- c("optim", "nlminb", "nlm")
   other_iter_fns <- c("glmmTMB", "glm.nb")
 
-  # Detect convergence checks anywhere in the document
-  full_text <- paste(ctx$lines, collapse = "\n")
-  all_calls <- unique(unlist(lapply(ctx$units, function(u) ast_fn_calls_in(u$xml))))
+  # Inspect actual AST nodes across units (never raw comments or bare strings)
+  all_calls <- character(0)
+  all_slots <- character(0)
+  all_dollars <- character(0)
+  all_lbb_keys <- character(0)
+
+  for (u in ctx$units) {
+    all_calls <- c(all_calls, ast_fn_calls_in(u$xml))
+    all_slots <- c(all_slots, xml2::xml_text(xml2::xml_find_all(u$xml, ".//expr[OP-AT]/SLOT")))
+    all_dollars <- c(all_dollars, xml2::xml_text(xml2::xml_find_all(u$xml, ".//expr[OP-DOLLAR]/SYMBOL")))
+    lbb_strs <- xml2::xml_text(xml2::xml_find_all(u$xml, ".//expr[LBB]/expr[2]/STR_CONST"))
+    all_lbb_keys <- c(all_lbb_keys, gsub("^['\"]|['\"]$", "", lbb_strs))
+  }
 
   has_mlm_check <- any(all_calls %in% c("isSingular", "check_singularity", "check_convergence", "allFit", "audit_estimator")) ||
-    grepl("optinfo|checkConv|\\$convergence|isSingular", full_text)
+    any(all_slots %in% c("optinfo", "conv", "checkConv")) ||
+    any(all_dollars %in% c("optinfo", "conv", "checkConv", "convergence")) ||
+    any(all_lbb_keys %in% c("optinfo", "conv", "convergence"))
+
   has_optim_check <- any(all_calls %in% c("check_convergence", "audit_estimator")) ||
-    grepl("\\$convergence|\\[\\[\"convergence\"\\]\\]|\\$code|\\[\\[\"code\"\\]\\]", full_text)
+    any(all_dollars %in% c("convergence", "code")) ||
+    any(all_lbb_keys %in% c("convergence", "code"))
+
   has_other_check <- any(all_calls %in% c("check_convergence", "audit_estimator")) ||
-    grepl("pdHess|\\$convergence|\\$converged", full_text)
+    any(all_dollars %in% c("pdHess", "convergence", "converged")) ||
+    any(all_lbb_keys %in% c("pdHess", "convergence", "converged"))
 
   findings <- list()
   for (u in ctx$units) {
@@ -997,31 +1016,89 @@ check_missing_convergence_check <- function(ctx) {
   findings
 }
 
-# 10. global_seed_override_in_fn
+# 10. global_seed_override_in_fn (supports function() & \(...), pure AST seed-restore check)
 check_global_seed_override_in_fn <- function(ctx) {
   findings <- list()
   for (u in ctx$units) {
-    fn_nodes <- xml2::xml_find_all(u$xml, ".//expr[FUNCTION]")
+    fn_nodes <- xml2::xml_find_all(u$xml, ".//expr[FUNCTION or OP-LAMBDA]")
     for (fn_nd in fn_nodes) {
-      # Find set.seed calls whose nearest enclosing FUNCTION is this fn_nd
       seed_calls <- ast_calls(fn_nd, "set.seed")
       if (length(seed_calls) == 0L) next
 
-      # Check if fn_nd restores .Random.seed via on.exit() or uses withr::local_seed
-      fn_calls <- ast_fn_calls_in(fn_nd)
-      fn_txt <- xml2::xml_text(fn_nd)
-      restores_seed <- ("on.exit" %in% fn_calls && grepl("\\.Random\\.seed", fn_txt)) ||
-        any(fn_calls %in% c("local_seed", "local_preserve_seed", "with_preserve_seed"))
+      # Only consider calls belonging directly to this function (not nested inner functions)
+      fn_path <- xml2::xml_path(fn_nd)
+      own_calls <- Filter(function(c_nd) {
+        nearest <- xml2::xml_find_first(c_nd, "ancestor::expr[FUNCTION or OP-LAMBDA][1]")
+        identical(xml2::xml_path(nearest), fn_path)
+      }, ast_calls(fn_nd))
+
+      own_call_names <- vapply(own_calls, ast_call_name, character(1L))
+      restores_seed <- any(own_call_names %in% c("local_seed", "local_preserve_seed", "with_preserve_seed"))
+
+      if (!restores_seed && "on.exit" %in% own_call_names) {
+        # Identify variables assigned from the actual `.Random.seed` symbol in this function
+        fn_assigns <- ast_assignments(fn_nd, u$line_offset)
+        saved_seed_vars <- unique(vapply(Filter(function(a) ".Random.seed" %in% a$rhs_symbols, fn_assigns),
+                                         `[[`, character(1L), "lhs_root"))
+        onexit_calls <- Filter(function(c_nd) identical(ast_call_name(c_nd), "on.exit"), own_calls)
+        for (oe in onexit_calls) {
+          oe_syms <- ast_symbols(oe)
+          if (".Random.seed" %in% oe_syms || length(intersect(oe_syms, saved_seed_vars)) > 0L) {
+            restores_seed <- TRUE
+            break
+          }
+        }
+      }
+
       if (restores_seed) next
 
       for (sc in seed_calls) {
-        # Ensure we only report once per set.seed at its innermost enclosing function
-        nearest_fn <- xml2::xml_find_first(sc, "ancestor::expr[FUNCTION][1]")
-        if (!identical(xml2::xml_path(nearest_fn), xml2::xml_path(fn_nd))) next
+        nearest_fn <- xml2::xml_find_first(sc, "ancestor::expr[FUNCTION or OP-LAMBDA][1]")
+        if (!identical(xml2::xml_path(nearest_fn), fn_path)) next
         ln <- ast_line(sc, u$line_offset)
         findings[[length(findings) + 1L]] <- make_finding(
           ctx, ln, ast_col(sc),
           "`set.seed()` called inside a function without restoring `.Random.seed` via `on.exit()` or `withr::local_seed()`."
+        )
+      }
+    }
+  }
+  findings
+}
+
+# 14. duplicate_parallel_seed
+check_duplicate_parallel_seed <- function(ctx) {
+  iter_fns <- c(
+    "lapply", "sapply", "vapply", "apply", "mclapply", "mcmapply",
+    "parLapply", "parSapply", "parApply", "clusterApply", "clusterApplyLB",
+    "future_lapply", "future_sapply", "future_map", "future_map_dbl",
+    "map", "map_dbl", "map_dfr", "map_chr", "map_int", "replicate"
+  )
+
+  findings <- list()
+  for (u in ctx$units) {
+    seed_calls <- ast_calls(u$xml, "set.seed")
+    for (sc in seed_calls) {
+      in_for <- !inherits(xml2::xml_find_first(sc, "ancestor::expr[FOR]"), "xml_missing")
+      in_foreach <- !inherits(
+        xml2::xml_find_first(sc, "ancestor::expr[SPECIAL[text()='%dopar%' or text()='%do%' or text()='%dorng%']]"),
+        "xml_missing"
+      )
+      in_iter_call <- ast_is_inside_call(sc, iter_fns)
+      if (!in_for && !in_foreach && !in_iter_call) next
+
+      args <- ast_call_args(sc)
+      if (length(args) < 1L || is.null(args[[1L]]$expr)) next
+      seed_expr <- args[[1L]]$expr
+      # Constant seed expression (contains zero variable symbols -> identical across every iteration/worker!)
+      if (length(ast_symbols(seed_expr)) == 0L) {
+        ln <- ast_line(sc, u$line_offset)
+        findings[[length(findings) + 1L]] <- make_finding(
+          ctx, ln, ast_col(sc),
+          paste0(
+            "Constant `set.seed(", xml2::xml_text(seed_expr), ")` inside loop or parallel worker ",
+            "produces identical duplicate draws on every iteration; derive distinct per-iteration L'Ecuyer streams instead."
+          )
         )
       }
     }
@@ -1165,6 +1242,15 @@ build_default_rules <- function() {
       description = "Parallel execution without independent L'Ecuyer-CMRG RNG streams can cause seed collisions or core-count sensitivity.",
       recommendation = "Use RNGkind(\"L'Ecuyer-CMRG\"), parallel::clusterSetRNGStream(), doRNG::registerDoRNG(), future.seed = TRUE, or statci_parallel_apply().",
       check = check_unsafe_parallel_rng
+    ),
+    new_stat_rule(
+      id = "duplicate_parallel_seed",
+      title = "Constant set.seed() inside loop or parallel worker",
+      severity = "error",
+      category = "parallel_rng",
+      description = "Resetting set.seed() to a fixed constant inside a loop or parallel worker causes every replication to draw identical duplicate data.",
+      recommendation = "Seed once before the loop with L'Ecuyer-CMRG or use statci_parallel_apply() for distinct per-task streams.",
+      check = check_duplicate_parallel_seed
     ),
     new_stat_rule(
       id = "preprocessing_before_split",

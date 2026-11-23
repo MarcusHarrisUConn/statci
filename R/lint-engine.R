@@ -25,9 +25,7 @@ stat_lint <- function(path,
                       rules = NULL,
                       exclude_rules = NULL,
                       skip_eval_false = FALSE) {
-  if (!is.character(path) || length(path) != 1L || !file.exists(path)) {
-    rlang::abort(paste0("File not found: `", path, "`."))
-  }
+  validate_existing_file(path, arg = "path")
   lines <- readLines(path, warn = FALSE, encoding = "UTF-8")
   ext <- tolower(tools::file_ext(path))
   is_rmd <- ext %in% c("qmd", "rmd")
@@ -115,12 +113,10 @@ stat_lint_dir <- function(path = ".",
   if (!is.character(path) || length(path) < 1L) {
     rlang::abort("`path` must be a non-empty character vector of directories.")
   }
-  missing_dirs <- path[!dir.exists(path)]
-  if (length(missing_dirs) > 0L) {
-    rlang::abort(paste0("Directory not found: ", paste(paste0("`", missing_dirs, "`"), collapse = ", "), "."))
-  }
+  for (p in path) validate_existing_dir(p, arg = "path")
   files <- unique(unlist(lapply(path, function(p) {
-    list.files(p, pattern = pattern, recursive = recursive, full.names = TRUE)
+    found <- list.files(p, pattern = pattern, recursive = recursive, full.names = TRUE)
+    found[vapply(found, is_safe_contained_file, logical(1L), root_dir = p)]
   })))
   if (!is.null(exclude_pattern) && nzchar(exclude_pattern) && length(files) > 0L) {
     files <- files[!grepl(exclude_pattern, files)]

@@ -24,12 +24,13 @@ remotes::install_github("MarcusHarrisUConn/statci")
 
 ### 1. AST-Based Statistical Linter (`stat_lint()`, `stat_lint_dir()`)
 
-Parses `.R`, `.qmd`, and `.Rmd` files into full XML abstract syntax trees (preserving exact original line numbers and cross-chunk scope in Quarto/RMarkdown documents) and evaluates **13 built-in methodological rules** plus user-registered custom rules (`new_stat_rule()`, `register_stat_rule()`):
+Parses `.R`, `.qmd`, and `.Rmd` files into full XML abstract syntax trees (preserving exact original line numbers and cross-chunk scope in Quarto/RMarkdown documents) and evaluates **14 built-in methodological rules** plus user-registered custom rules (`new_stat_rule()`, `register_stat_rule()`):
 
 | Rule ID | Severity | Hazard Detected |
 |---|---|---|
 | `unseeded_randomness` | `error` | Top-level stochastic calls (`rnorm`, `sample`, `boot`, `kmeans`, etc.) without prior `set.seed()` / `withr::with_seed()` |
 | `unsafe_parallel_rng` | `error` | `mclapply` / `parLapply` / `foreach %dopar%` / `future_*` without L'Ecuyer-CMRG, `clusterSetRNGStream()`, `doRNG`, or `future.seed` |
+| `duplicate_parallel_seed` | `error` | Constant `set.seed(42)` inside loops or parallel workers generating identical duplicate replications |
 | `preprocessing_before_split` | `error` | `scale()`, `prcomp()`, `preProcess()`, or imputation applied to the full dataset before train/test splitting |
 | `uncentered_mlm_interaction` | `warning` | Fixed-effect interactions in `lmer`/`glmer`/`lme`/`glmmTMB`/`brm` using raw uncentered predictors |
 | `silent_listwise_mismatch` | `warning` | Comparing models with differing variable sets via `anova()`/`AIC()`/`BIC()` on unharmonized data |

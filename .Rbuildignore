@@ -3,6 +3,7 @@
 ^\.github$
 ^PROJECT_STATEMENT\.md$
 ^ARCHITECTURE\.md$
+^SECURITY\.md$
 ^README\.Rmd$
 ^LICENSE\.md$
 ^_pkgdown\.yml$

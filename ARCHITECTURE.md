@@ -12,9 +12,10 @@ statci/
 ├── ARCHITECTURE.md
 ├── R/
 │   ├── statci-package.R       # Package-level docs and shared imports
+│   ├── security.R             # Centralized HTML/MD escaping, path/symlink & GHA validators
 │   ├── utils.R                # Shared helpers, status algebra, formatting, RNG utils
-│   ├── lint-parser.R          # .R / .qmd / .Rmd projection, XML AST construction, suppression parser
-│   ├── lint-rules.R           # Rule S3 constructor, registry, and 13 built-in AST rules
+│   ├── lint-parser.R          # .R / .qmd / .Rmd projection, XML AST construction, AST suppression parser
+│   ├── lint-rules.R           # Rule S3 constructor, registry, and 14 built-in AST rules
 │   ├── lint-engine.R          # stat_lint(), stat_lint_text(), stat_lint_dir(), S3 methods
 │   ├── audit-estimator.R      # audit_estimator() parameter recovery, coverage, Type-I, convergence
 │   ├── audit-sbc.R            # audit_sbc() Simulation-Based Calibration (Talts et al., 2018)
@@ -66,23 +67,24 @@ Authors can silence intentional exceptions using standard line comments:
 
 Rules are `statci_rule` S3 objects stored in a package registry environment (`.statci_rule_registry`). Users inspect rules via `list_stat_rules()`, register custom AST rules via `register_stat_rule(new_stat_rule(...))`, and filter rules per invocation via `rules` / `exclude_rules`.
 
-`statci` ships **13 built-in statistical & methodological lint rules**:
+`statci` ships **14 built-in statistical & methodological lint rules**:
 
 | # | Rule ID | Severity | Category | Methodological Hazard Caught |
 |---|---------|----------|----------|------------------------------|
 | 1 | `unseeded_randomness` | error | reproducibility | Top-level stochastic calls (`rnorm`, `sample`, `boot`, `kmeans`, etc.) without prior `set.seed()`, `withr::with_seed()`, `RNGkind()`, or enclosing seed wrapper |
 | 2 | `unsafe_parallel_rng` | error | parallel_rng | `mclapply`/`parLapply`/`foreach %dopar%`/`future_*` without L'Ecuyer-CMRG, `clusterSetRNGStream`, `%dorng%`/`doRNG`, or `future.seed` |
-| 3 | `preprocessing_before_split` | error | data_leakage | Global `scale()`, `prcomp()`, `preProcess()`, `mice()`, etc. executed on a dataset before train/test splitting |
-| 4 | `uncentered_mlm_interaction` | warning | modeling | Fixed-effect interactions (`*`, `:`) in `lmer`/`glmer`/`lme`/`glmmTMB`/`brm` using raw predictors with no centering call, naming suffix, or prior centering definition |
-| 5 | `silent_listwise_mismatch` | warning | modeling | Comparing models with differing predictor sets via `anova()`, `AIC()`, `BIC()`, or `lrtest()` on an unharmonized dataset without `na.omit`/`complete.cases`/`drop_na`/`na.action = na.fail` |
-| 6 | `silent_factor_drop` | warning | modeling | `as.numeric()`/`as.integer()` applied directly to a factor variable (coercing level indices), or passing a `subset()`/`filter()` data frame to modeling/contrast functions without `droplevels()`/`fct_drop()` |
-| 7 | `equality_on_float` | warning | numerics | Exact `==` / `!=` on floating-point literals or computed continuous expressions instead of `all.equal()`, `near()`, or tolerance checks |
-| 8 | `unadjusted_multiple_testing` | warning | inference | Hypothesis tests (`t.test`, `cor.test`, `wilcox.test`, `lm` p-values, etc.) run inside loops/applies without `p.adjust()` or multiple-testing correction in scope |
-| 9 | `missing_convergence_check` | warning | modeling | Iterative models (`lmer`, `glmer`, `optim`, `nlminb`, `glmmTMB`) fitted without programmatic checks for convergence or `isSingular()` |
-| 10 | `global_seed_override_in_fn` | warning | reproducibility | Calling bare `set.seed()` inside reusable functions without restoring `.Random.seed` via `on.exit()` or `withr::local_seed()`/`with_seed()` |
-| 11 | `short_logical_literal` | warning | hygiene | Using mutable `T`/`F` symbols as logical literals/arguments instead of reserved `TRUE`/`FALSE` (ignoring user-bound numeric variables like `T <- 100`) |
-| 12 | `cor_without_use_arg` | info | modeling | Calling `cor()` or `cov()` without an explicit `use =` missing-data policy |
-| 13 | `absolute_path_in_script` | warning | reproducibility | Hardcoded machine-specific absolute paths (`/Users/...`, `/home/...`, `C:\...`, `~/...`) in file I/O or `setwd()` calls |
+| 3 | `duplicate_parallel_seed` | error | parallel_rng | Constant `set.seed(42)` inside loops or parallel workers producing identical duplicate Monte Carlo draws |
+| 4 | `preprocessing_before_split` | error | data_leakage | Global `scale()`, `prcomp()`, `preProcess()`, `mice()`, etc. executed on a dataset before train/test splitting |
+| 5 | `uncentered_mlm_interaction` | warning | modeling | Fixed-effect interactions (`*`, `:`) in `lmer`/`glmer`/`lme`/`glmmTMB`/`brm` using raw predictors with no centering call, naming suffix, or prior centering definition |
+| 6 | `silent_listwise_mismatch` | warning | modeling | Comparing models with differing predictor sets via `anova()`, `AIC()`, `BIC()`, or `lrtest()` on an unharmonized dataset without `na.omit`/`complete.cases`/`drop_na`/`na.action = na.fail` |
+| 7 | `silent_factor_drop` | warning | modeling | `as.numeric()`/`as.integer()` applied directly to a factor variable (coercing level indices), or passing a `subset()`/`filter()` data frame to modeling/contrast functions without `droplevels()`/`fct_drop()` |
+| 8 | `equality_on_float` | warning | numerics | Exact `==` / `!=` on floating-point literals or computed continuous expressions instead of `all.equal()`, `near()`, or tolerance checks |
+| 9 | `unadjusted_multiple_testing` | warning | inference | Hypothesis tests (`t.test`, `cor.test`, `wilcox.test`, `lm` p-values, etc.) run inside loops/applies without `p.adjust()` or multiple-testing correction in scope |
+| 10 | `missing_convergence_check` | warning | modeling | Iterative models (`lmer`, `glmer`, `optim`, `nlminb`, `glmmTMB`) fitted without programmatic AST checks for convergence or `isSingular()` |
+| 11 | `global_seed_override_in_fn` | warning | reproducibility | Calling bare `set.seed()` inside reusable functions or `\(...)` lambdas without restoring `.Random.seed` via `on.exit()` or `withr::local_seed()`/`with_seed()` |
+| 12 | `short_logical_literal` | warning | hygiene | Using mutable `T`/`F` symbols as logical literals/arguments instead of reserved `TRUE`/`FALSE` (ignoring user-bound numeric variables like `T <- 100`) |
+| 13 | `cor_without_use_arg` | info | modeling | Calling `cor()` or `cov()` without an explicit `use =` missing-data policy |
+| 14 | `absolute_path_in_script` | warning | reproducibility | Hardcoded machine-specific absolute paths (`/Users/...`, `/home/...`, `C:\...`, `~/...`) in file I/O or `setwd()` calls |
 
 ---
 

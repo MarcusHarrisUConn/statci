@@ -86,6 +86,10 @@ audit_sbc <- function(prior,
         if (is.null(nm)) nm <- paste0("theta_", seq_along(th))
         names(th) <- nm
 
+        if (length(th) == 0L || any(!is.finite(th))) {
+          rlang::abort("`prior()` returned non-finite parameter value(s).")
+        }
+
         y <- dgp(th)
         dr <- posterior_draws(y)
         if (is.data.frame(dr)) dr <- as.matrix(dr)
@@ -95,6 +99,9 @@ audit_sbc <- function(prior,
         }
         if (ncol(dr) != length(th)) {
           rlang::abort(paste0("`posterior_draws()` returned ", ncol(dr), " column(s), expected ", length(th), "."))
+        }
+        if (any(!is.finite(dr))) {
+          rlang::abort("`posterior_draws()` returned non-finite (NA/NaN/Inf) draw(s).")
         }
         L <- nrow(dr)
         if (L < 5L) {
@@ -136,7 +143,27 @@ audit_sbc <- function(prior,
   valid_idx <- which(!vapply(ranks_list, is.null, logical(1L)))
   n_valid <- length(valid_idx)
   if (n_valid < 10L) {
-    rlang::abort(paste0("SBC failed: fewer than 10 valid replications completed (", n_valid, " of ", n_sim, ")."))
+    empty_sum <- tibble::tibble(
+      parameter = character(0), n_valid = integer(0), n_draws = integer(0),
+      n_bins = integer(0), chisq_stat = numeric(0), chisq_p = numeric(0),
+      ks_stat = numeric(0), ks_p = numeric(0), cov_50 = numeric(0),
+      cov_90 = numeric(0), status = character(0)
+    )
+    return(structure(
+      list(
+        summary = empty_sum,
+        ranks = matrix(numeric(0), nrow = 0L, ncol = 0L),
+        bin_counts = list(),
+        n_sim = n_sim,
+        n_valid = as.integer(n_valid),
+        n_errors = as.integer(n_errors),
+        n_draws = n_draws,
+        n_bins = n_bins,
+        mc_alpha = mc_alpha,
+        status = "fail"
+      ),
+      class = "statci_sbc"
+    ))
   }
 
   ranks_mat <- do.call(rbind, ranks_list[valid_idx])
@@ -144,8 +171,8 @@ audit_sbc <- function(prior,
   c50_mat <- do.call(rbind, cov50_list[valid_idx])
   c90_mat <- do.call(rbind, cov90_list[valid_idx])
 
-  # Ensure n_bins does not exceed n_draws + 1
-  eff_bins <- min(n_bins, n_draws + 1L)
+  # Guard small-B / high-bin ratio so chi-square test stays well-posed
+  eff_bins <- max(2L, min(n_bins, n_draws + 1L, as.integer(floor(n_valid / 2))))
   rows <- vector("list", length(param_names))
   bin_counts_list <- list()
 

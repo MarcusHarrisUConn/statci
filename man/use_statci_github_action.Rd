@@ -7,6 +7,7 @@
 use_statci_github_action(
   path = ".",
   file = ".github/workflows/statci.yaml",
+  branches = c("main", "master"),
   r_version = "release",
   fail_on = c("fail", "warn"),
   lint_paths = c("R"),
@@ -22,32 +23,35 @@ use_statci_github_action(
 \item{path}{Root project directory (default \code{"."}).}
 
 \item{file}{Workflow path relative to \code{path} (default
-\code{".github/workflows/statci.yaml"}).}
+\code{".github/workflows/statci.yaml"}). Must resolve inside \code{path}.}
 
-\item{r_version}{R version specifier passed to \code{r-lib/actions/setup-r@v2}
-(default \code{"release"}).}
+\item{branches}{Character vector of branch names triggering \code{push} and
+\code{pull_request} workflows (default \code{c("main", "master")}).}
+
+\item{r_version}{R version specifier passed to \code{r-lib/actions/setup-r}
+(default \code{"release"}). Allowed values: \code{"release"}, \code{"devel"}, \code{"oldrel"},
+\code{"oldrel-1"}..\code{"oldrel-4"}, or a numeric version such as \code{"4.4.2"}.}
 
 \item{fail_on}{CI gate level passed to \code{\link[=statci_check_gate]{statci_check_gate()}}: \code{"fail"}
 (default) or \code{"warn"}.}
 
-\item{lint_paths}{Character vector of project directories to scan with
-\code{\link[=stat_lint_dir]{stat_lint_dir()}} when \code{audit_script} is \code{NULL} (default \code{c("R")}).}
+\item{lint_paths}{Character vector of project-relative directories to scan
+with \code{\link[=stat_lint_dir]{stat_lint_dir()}} when \code{audit_script} is \code{NULL} (default \code{c("R")}).}
 
-\item{manuscript}{Optional path to a \code{.qmd}/\code{.Rmd} manuscript to audit
-against \code{models_path}.}
+\item{manuscript}{Optional project-relative path to a \code{.qmd}/\code{.Rmd}
+manuscript to audit against \code{models_path}.}
 
-\item{models_path}{Optional path to an \code{.rds} file or directory of \code{.rds}
-model objects used with \code{manuscript}.}
+\item{models_path}{Optional project-relative path to an \code{.rds} file or
+directory of \code{.rds} model objects used with \code{manuscript}.}
 
-\item{audit_script}{Optional path to a custom project R script (e.g.,
-\code{"inst/statci/run-audit.R"}) that executes full estimator calibration,
-manuscript auditing, and sensitivity checks. When supplied, the workflow
-executes \code{audit_script} directly.}
+\item{audit_script}{Optional project-relative path to a custom R script
+(ending in \code{.R} or \code{.r}) that executes full estimator calibration,
+manuscript auditing, and sensitivity checks.}
 
-\item{report_dir}{Relative directory where HTML/Markdown audit artifacts are
-written (default \code{"statci-reports"}).}
+\item{report_dir}{Project-relative directory where HTML/Markdown audit
+artifacts are written (default \code{"statci-reports"}).}
 
-\item{upload_artifact}{Logical; include an \code{actions/upload-artifact@v4} step
+\item{upload_artifact}{Logical; include an \code{actions/upload-artifact} step
 for HTML and Markdown audit reports? Default \code{TRUE}.}
 
 \item{overwrite}{Logical; overwrite existing workflow file? Default \code{FALSE}.}
@@ -56,12 +60,20 @@ for HTML and Markdown audit reports? Default \code{TRUE}.}
 Invisibly returns the normalized path to the generated YAML file.
 }
 \description{
-Creates a ready-to-use GitHub Actions workflow YAML file (default
+Creates a hardened GitHub Actions workflow YAML file (default
 \code{.github/workflows/statci.yaml}) that installs R and package dependencies,
 runs \code{statci} statistical linting, optional manuscript auditing or custom
 calibration/sensitivity scripts, writes a GitHub-Flavored Markdown summary
 to \verb{$GITHUB_STEP_SUMMARY}, uploads the standalone HTML audit dashboard as a
 workflow artifact, and enforces the \code{statci} pass/warn/fail gate.
+}
+\details{
+All user-supplied parameters (\code{branches}, \code{r_version}, \code{lint_paths},
+\code{manuscript}, \code{models_path}, \code{audit_script}, \code{report_dir}, \code{file}) are
+strictly validated against path traversal, newline/YAML injection, and
+shell/R command injection, and passed into the runner strictly via workflow
+\verb{env:} variables rather than interpolating untrusted strings into \verb{run:}
+blocks.
 }
 \examples{
 tmp <- tempfile("statci_gh_")

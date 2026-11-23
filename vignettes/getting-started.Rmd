@@ -27,7 +27,7 @@ library(statci)
 
 ## 1. Inspecting Built-In Statistical Lint Rules
 
-`statci` ships 13 built-in AST rules targeting reproducibility, parallel RNG safety, train/test data leakage, multilevel centering, missingness/factor hazards, floating-point comparisons, and multiple-testing inflation:
+`statci` ships 14 built-in AST rules targeting reproducibility, parallel RNG safety, duplicate worker seeds, train/test data leakage, multilevel centering, missingness/factor hazards, floating-point comparisons, and multiple-testing inflation:
 
 ```{r list-rules}
 list_stat_rules()[, c("id", "severity", "category", "title")]

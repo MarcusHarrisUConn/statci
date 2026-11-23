@@ -321,22 +321,22 @@ md_badge <- function(status) {
 
 df_to_md_table <- function(df) {
   if (is.null(df) || nrow(df) == 0L) return("_No rows._")
-  esc <- function(v) gsub("\\|", "\\\\|", gsub("\n", " ", as.character(v)))
-  hdr <- paste0("| ", paste(esc(names(df)), collapse = " | "), " |")
+  hdr <- paste0("| ", paste(md_escape_cell(names(df)), collapse = " | "), " |")
   sep <- paste0("| ", paste(rep("---", ncol(df)), collapse = " | "), " |")
   rows <- vapply(seq_len(nrow(df)), function(i) {
-    paste0("| ", paste(esc(unlist(df[i, ], use.names = FALSE)), collapse = " | "), " |")
+    paste0("| ", paste(md_escape_cell(unlist(df[i, ], use.names = FALSE)), collapse = " | "), " |")
   }, character(1L))
   paste(c(hdr, sep, rows), collapse = "\n")
 }
 
 build_markdown_report <- function(report, title) {
+  safe_title <- md_escape_cell(title)
   out <- c(
-    paste0("# ", title),
+    paste0("# ", safe_title),
     "",
     paste0("**Overall Status:** ", md_badge(report$status),
-           " | **Generated:** ", report$metadata$created_at,
-           " | **statci:** v", report$metadata$statci_version),
+           " | **Generated:** ", md_escape_cell(report$metadata$created_at),
+           " | **statci:** v", md_escape_cell(report$metadata$statci_version)),
     ""
   )
 
@@ -497,7 +497,7 @@ build_markdown_report <- function(report, title) {
 # ---------------------------------------------------------------------------
 
 html_esc <- function(x) {
-  htmltools::htmlEscape(as.character(x))
+  html_escape_strict(x)
 }
 
 html_pill <- function(status) {
@@ -772,6 +772,7 @@ build_html_report <- function(report, title) {
   paste0(
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\';">',
     "<title>", html_esc(title), "</title><style>", css, "</style></head><body>",
     "<header><h1>", html_esc(title), "</h1>",
     '<div class="meta">',

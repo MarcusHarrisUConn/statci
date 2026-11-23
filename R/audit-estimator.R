@@ -173,16 +173,18 @@ audit_estimator <- function(dgp,
       alpha = alpha,
       mc_alpha = mc_alpha
     )
-  } else if (!is.null(true_params)) {
+  } else if (!is.null(true_params) && sim$n_valid > 0L) {
     tp_matched <- match_true_params(true_params, colnames(sim$estimates))
-    zero_params <- names(tp_matched)[abs(tp_matched) < 1e-12]
-    if (length(zero_params) > 0L) {
-      type1 <- evaluate_type1(
-        sim = sim,
-        target_params = zero_params,
-        alpha = alpha,
-        mc_alpha = mc_alpha
-      )
+    if (length(tp_matched) > 0L) {
+      zero_params <- names(tp_matched)[abs(tp_matched) < 1e-12]
+      if (length(zero_params) > 0L) {
+        type1 <- evaluate_type1(
+          sim = sim,
+          target_params = zero_params,
+          alpha = alpha,
+          mc_alpha = mc_alpha
+        )
+      }
     }
   }
 
@@ -316,6 +318,9 @@ run_estimator_replications <- function(dgp, estimator, params_arg, n_sim, alpha)
 
     if (isTRUE(rec$singular)) {
       n_singular <- n_singular + 1L
+    }
+    if (length(rec$estimate) == 0L || all(!is.finite(rec$estimate))) {
+      rec$converged <- FALSE
     }
     if (!isTRUE(rec$converged)) {
       n_nonconverged <- n_nonconverged + 1L
@@ -536,10 +541,12 @@ evaluate_type1 <- function(sim, target_params, alpha, mc_alpha) {
     pv <- pv[is.finite(pv)]
     m <- length(pv)
     if (m < 2L) {
+      # If estimates converged but no finite p-values were provided (e.g. degenerate zero-SE estimator), warn cleanly
+      st_m <- if (sim$n_valid == 0L) "fail" else "warn"
       rows[[j]] <- tibble::tibble(
         parameter = pnm, n_valid = as.integer(m), nominal_alpha = alpha,
         empirical_alpha = NA_real_, mcse = NA_real_, ci_low = NA_real_,
-        ci_high = NA_real_, binom_p = NA_real_, status = "fail"
+        ci_high = NA_real_, binom_p = NA_real_, status = st_m
       )
       next
     }

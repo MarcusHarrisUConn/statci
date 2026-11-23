@@ -1,6 +1,6 @@
 Package: statci
 Title: Automated Statistical CI/CD, Calibration Fuzzing, and Manuscript Auditing
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: 
     person("Marcus", "Harris", , "marcus.harris.uconn@gmail.com", role = c("aut", "cre", "cph"))
 Description: Provides automated continuous integration and verification tools for

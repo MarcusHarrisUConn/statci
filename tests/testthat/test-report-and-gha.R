@@ -78,7 +78,7 @@ test_that("statci_report aggregates all pillars, renders HTML/Markdown/JSON, and
   expect_match(html_txt, "Adversarial Sensitivity Battery")
 
   md_txt <- paste(readLines(md_path, warn = FALSE), collapse = "\n")
-  expect_match(md_txt, "# Full Pipeline Audit <Test>")
+  expect_match(md_txt, "# Full Pipeline Audit &lt;Test&gt;", fixed = TRUE)
   expect_match(md_txt, "## Executive Summary")
 
   if (rlang::is_installed("jsonlite")) {
@@ -138,5 +138,6 @@ test_that("use_statci_github_action writes valid GitHub Actions YAML and guards 
   )
   txt2 <- paste(readLines(wf2, warn = FALSE), collapse = "\n")
   expect_match(txt2, "shell: bash")
-  expect_match(txt2, "Rscript \"scripts/run-statci.R\"")
+  expect_match(txt2, "STATCI_AUDIT_SCRIPT: 'scripts/run-statci.R'", fixed = TRUE)
+  expect_match(txt2, 'Rscript --vanilla "$STATCI_AUDIT_SCRIPT"', fixed = TRUE)
 })
