@@ -16,6 +16,7 @@ use_statci_github_action(
   audit_script = NULL,
   report_dir = "statci-reports",
   upload_artifact = TRUE,
+  upload_sarif = FALSE,
   overwrite = FALSE
 )
 }
@@ -53,6 +54,11 @@ artifacts are written (default \code{"statci-reports"}).}
 
 \item{upload_artifact}{Logical; include an \code{actions/upload-artifact} step
 for HTML and Markdown audit reports? Default \code{TRUE}.}
+
+\item{upload_sarif}{Logical; if \code{TRUE}, export AST lint findings to SARIF
+2.1.0 via \code{\link[=export_statci_sarif]{export_statci_sarif()}} and add a
+\code{github/codeql-action/upload-sarif} step (also adds
+\code{security-events: write} permission). Default \code{FALSE}.}
 
 \item{overwrite}{Logical; overwrite existing workflow file? Default \code{FALSE}.}
 }

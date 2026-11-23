@@ -1,0 +1,110 @@
+url: https://marcusharrisphd.com/statci/
+
+template:
+  bootstrap: 5
+  bootswatch: flatly
+  bslib:
+    primary: "#264653"
+    secondary: "#6e7f8d"
+    base_font:
+      google: "Source Sans Pro"
+    heading_font:
+      google: "Source Serif 4"
+    code_font:
+      google: "JetBrains Mono"
+
+navbar:
+  structure:
+    left: [intro, reference, articles, pdfs, news]
+    right: [search, github]
+  components:
+    pdfs:
+      text: PDFs
+      menu:
+        - text: "Field Guide (PDF)"
+          href: statci-guide.pdf
+        - text: "Reference Manual (PDF)"
+          href: statci-manual.pdf
+
+home:
+  title: "statci: Statistical CI/CD, Calibration Fuzzing & Manuscript Auditing"
+  description: >
+    Automated statistical CI/CD for R: 17-rule AST methodological linter with
+    SARIF 2.1.0 export, Simulation-Based Calibration (SBC) and power-curve
+    fuzzing, parallel RNG invariance testing, Quarto/RMarkdown/LaTeX manuscript
+    auditing, and adversarial robustness suites.
+
+articles:
+  - title: "Core Workflows"
+    navbar: ~
+    contents:
+      - getting-started
+      - calibration-and-robustness
+      - manuscript-auditing
+      - github-actions-ci
+
+reference:
+  - title: "AST Statistical Linter & SARIF Export"
+    desc: >
+      Parse R scripts and Quarto/RMarkdown chunks into XML abstract syntax trees,
+      evaluate 17 built-in statistical lint rules or custom rules, and export
+      SARIF 2.1.0 JSON for GitHub Code Scanning.
+    contents:
+      - stat_lint
+      - stat_lint_text
+      - stat_lint_dir
+      - list_stat_rules
+      - new_stat_rule
+      - register_stat_rule
+      - unregister_stat_rule
+      - reset_stat_rules
+      - export_statci_sarif
+
+  - title: "Estimator Calibration, SBC, Power Curves & Parallel RNG"
+    desc: >
+      Verify bias, RMSE, exact Clopper-Pearson interval coverage, Type-I error,
+      Simulation-Based Calibration (SBC), power monotonicity, and core-count-invariant
+      L'Ecuyer-CMRG parallel RNG streams.
+    contents:
+      - audit_estimator
+      - audit_sbc
+      - plot.statci_sbc
+      - audit_power_curve
+      - plot.statci_power_curve
+      - check_parallel_rng
+      - statci_parallel_apply
+
+  - title: "Manuscript-to-Code Consistency Auditor"
+    desc: >
+      Cross-check inline prose, Markdown/Quarto tables, LaTeX .tex tables, APA
+      statistics, and internal arithmetic against fitted R model objects.
+    contents:
+      - audit_manuscript
+      - audit_manuscript_text
+
+  - title: "Adversarial Sensitivity & Robustness Battery"
+    desc: >
+      Stress-test fitted modeling pipelines under outlier winsorization,
+      leave-one-cluster-out (LOCO) / leave-one-out influence, missingness
+      contrasts, and nonparametric bootstrap resampling.
+    contents:
+      - audit_sensitivity
+      - plot.statci_sensitivity
+
+  - title: "Project Orchestration, Reports & GitHub Actions"
+    desc: >
+      Drive full project verification from .statci.yml, render standalone HTML,
+      Markdown, and JSON audit dashboards, enforce CI gates, and generate
+      hardened GitHub Actions workflows.
+    contents:
+      - read_statci_config
+      - statci_audit_project
+      - statci_report
+      - render_statci_report
+      - statci_check_gate
+      - use_statci_github_action
+
+  - title: "Package Overview & Re-exports"
+    contents:
+      - statci-package
+      - reexports

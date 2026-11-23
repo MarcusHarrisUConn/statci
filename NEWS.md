@@ -1,24 +1,29 @@
+# statci 0.3.0
+
+## New Features & Workflow Orchestration
+- Added declarative `.statci.yml` project configuration (`read_statci_config()`, strictly parsed with `eval.expr = FALSE` and schema validation) and one-call project orchestration (`statci_audit_project()`) supporting rule filtering, severity overrides, manuscript auditing, multi-format report output, and CI gate enforcement.
+- Added 3 new high-signal, zero-false-positive AST lint rules bringing the built-in catalog to **17 rules**: `silent_na_coercion`, `stepwise_selection_unvalidated`, and `in_sample_prediction_eval`.
+- Upgraded `audit_manuscript()` and `audit_manuscript_text()` to audit Markdown/Quarto pipe tables, LaTeX `.tex` manuscripts and `tabular` tables (`% statci:` comment anchors), APA `F(df1, df2)` and `chi2(df)` statistics, and interval-arithmetic **internal consistency checks** (`t` vs. `b / SE` and `95% CI` midpoint/width vs. `b` and `SE`, even when `models = NULL`).
+- Added `audit_power_curve()` (with `print()`, `as_tibble()`, `plot()`, and unified `statci_report()` integration) auditing empirical power monotonicity, null Type-I error calibration, target power achievement with exact Clopper-Pearson bounds, and minimum detectable effect (`mde`).
+- Added `export_statci_sarif()` emitting valid SARIF 2.1.0 JSON for GitHub Code Scanning pull-request annotations, plus optional `upload_sarif = TRUE` integration in `use_statci_github_action()`.
+
+## CRAN Submission Readiness & Documentation
+- Expanded to 4 executable vignettes: `getting-started`, `calibration-and-robustness`, `manuscript-auditing`, and `github-actions-ci`.
+- Added `inst/CITATION`, example scripts/manuscripts/configs in `inst/examples/`, PDF Field Guide source in `inst/guides/statci-guide.Rmd`, `inst/WORDLIST` for zero-misspelling `spelling::spell_check_package()`, `cran-comments.md`, `_pkgdown.yml`, and GitHub Actions workflows for `R CMD check` and `pkgdown`.
+- Audited `DESCRIPTION` (<= 65-character Title, formal Talts et al. 2018 and Clopper & Pearson 1934 DOIs), every exported `.Rd` manual page, and strict 2-core / `tempdir()` CRAN hygiene.
+
 # statci 0.2.0
 
 ## Security Hardening
 - Added centralized security, escaping, and validation module (`R/security.R`) and documented threat model and mitigations in `SECURITY.md`.
-- Hardened `use_statci_github_action()` against YAML, shell, and R code injection: strictly validates `branches` (new parameter), `r_version`, `lint_paths`, `manuscript`, `models_path`, `audit_script`, `report_dir`, and `file` containment; eliminates untrusted string interpolation into `run:` blocks via workflow `env:` variables; pins GitHub Actions versions and disables checkout credential persistence (`persist-credentials: false`).
-- Hardened `render_statci_report()` with strict HTML/attribute escaping (`html_escape_strict()`), a Content-Security-Policy (`default-src 'none'; style-src 'unsafe-inline'`) `<meta>` header, and Markdown table HTML neutralization (`md_escape_cell()`).
-- Hardened `stat_lint()`, `stat_lint_dir()`, and `audit_manuscript()` against broken symlinks, control characters, and directory-escaping symlinks.
-- Hardened `audit_manuscript()` regex engines against ReDoS catastrophic backtracking with strictly linear-time bounded patterns and per-line length guards.
+- Hardened `use_statci_github_action()` against YAML, shell, and R code injection via strict allowlist validators, workflow `env:` indirection, pinned action versions, and `persist-credentials: false`.
+- Hardened `render_statci_report()` with strict HTML/attribute escaping (`html_escape_strict()`), a Content-Security-Policy `<meta>` header, and Markdown table HTML neutralization (`md_escape_cell()`).
+- Hardened file/directory scanning against broken symlinks, control bytes, and symlink traversal, and hardened `audit_manuscript()` against ReDoS with linear-time bounded regexes.
 
-## AST Linter Improvements
-- Added built-in rule #14 (`duplicate_parallel_seed`) catching constant `set.seed()` calls inside loops and parallel workers (now 14 built-in AST rules).
-- Replaced raw-line suppression scanning with AST `<COMMENT>`-backed `parse_suppressions_ast()` so string literals containing `"# statci-ignore"` cannot evade linting.
-- Added full R 4.1+ shorthand lambda (`\(x) ...`, `<OP-LAMBDA>`) support in `ast_is_inside_function()` and `global_seed_override_in_fn`.
-- Hardened `missing_convergence_check`, `global_seed_override_in_fn`, `silent_listwise_mismatch`, and `unadjusted_multiple_testing` to use pure AST queries immune to comments and string literals.
-- Handled non-evaluated Quarto/RMarkdown (`eval: false` / `eval = FALSE`) pseudocode chunks gracefully without spurious parse errors.
-
-## Calibration, SBC, Sensitivity & Manuscript Accuracy
-- Added full scientific notation parsing (`-3.5e-2`, `1.2e-4`, `p < 1e-4`, `1.2 × 10^-4`, `1.2 \times 10^{-4}`), scientific rounding-unit tolerance, en-dash CI range separator handling (`[-0.15–0.42]`), leading-dot negative values (`-.42`), `-0.00`, and IEEE-754 half-to-even boundary tolerance in `audit_manuscript()`.
-- Fixed crash in `audit_estimator()` when 100% of replications fail to converge, counted all-`NaN`/`Inf` estimator outputs as non-convergence, and handled zero-variance constant estimators gracefully.
-- Hardened `audit_sbc()` to reject/count `NaN`/`Inf` draws cleanly, return a structured `"fail"` audit when fewer than 10 valid replications complete, and guard small-$B$ / high-bin ratios.
-- Hardened `audit_sensitivity()` against `NaN`/`Inf` refits, all-`NA` columns, single-cluster datasets, and unbalanced cluster sizes in LOCO jackknife and cluster bootstrap.
+## AST Linter & Accuracy Improvements
+- Added built-in rule #14 (`duplicate_parallel_seed`), AST `<COMMENT>`-backed suppression parsing, R 4.1+ `\(x)` lambda support, and pure AST convergence/seed-restore inspection.
+- Added scientific notation parsing and rounding-unit tolerance, en-dash CI range handling, `-0.00`, and IEEE-754 half-to-even boundary rounding in `audit_manuscript()`.
+- Hardened `audit_estimator()`, `audit_sbc()`, and `audit_sensitivity()` for 100% non-convergence, `NaN`/`Inf` outputs, zero-variance estimators, small-bin SBC guards, and unbalanced/single-cluster LOCO datasets.
 
 # statci 0.1.0
 

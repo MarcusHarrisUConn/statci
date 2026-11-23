@@ -2,26 +2,28 @@
 % Please edit documentation in R/audit-manuscript.R
 \name{audit_manuscript}
 \alias{audit_manuscript}
-\title{Audit a Quarto/RMarkdown manuscript against saved R model objects}
+\title{Audit a Quarto, RMarkdown, or LaTeX manuscript against saved R model objects}
 \usage{
 audit_manuscript(
   manuscript,
-  models,
+  models = NULL,
   tol_extra = 0,
   warn_rounding = TRUE,
-  default_model = NULL
+  default_model = NULL,
+  check_internal = TRUE
 )
 }
 \arguments{
-\item{manuscript}{Path to a \code{.qmd}, \code{.Rmd}, or \code{.md} file.}
+\item{manuscript}{Path to a \code{.qmd}, \code{.Rmd}, \code{.md}, or \code{.tex} file.}
 
-\item{models}{One of:
+\item{models}{Optional saved models to cross-check against. One of:
 \itemize{
 \item A named list of fitted model objects (\code{lm}, \code{glm}, \code{lmerMod}, \code{htest})
 or tidy summary data frames;
 \item A single fitted model object or tidy summary data frame;
 \item Path to an \code{.rds} file containing a model or named list of models;
-\item Path to a directory containing \code{.rds} model files (keyed by filename stem).
+\item Path to a directory containing \code{.rds} model files (keyed by filename stem);
+\item \code{NULL} to run internal arithmetic consistency checks only.
 }}
 
 \item{tol_extra}{Non-negative numeric extra tolerance added on top of the
@@ -33,29 +35,35 @@ unit in the last reported decimal place are flagged as \code{"warn"}
 
 \item{default_model}{Optional default model name used for untagged claims
 when multiple models are provided.}
+
+\item{check_internal}{Logical; if \code{TRUE} (default), run interval-arithmetic
+internal consistency checks (\code{t} vs \code{b / SE}, \verb{95\% CI} midpoint & width
+vs \code{b} and \code{SE}) on every claim group and table row.}
 }
 \value{
 An S3 object of class \code{"statci_manuscript_audit"} containing \code{checks}
-(a \link[tibble:tibble]{tibble::tibble}), \code{summary}, \code{manuscript}, \code{models_checked}, and
-overall \code{status} (\code{"pass"}, \code{"warn"}, or \code{"fail"}).
+(model comparison \link[tibble:tibble]{tibble::tibble}), \code{internal_checks} (internal arithmetic
+\link[tibble:tibble]{tibble::tibble}), \code{summary}, \code{manuscript}, \code{models_checked}, and overall
+\code{status} (\code{"pass"}, \code{"warn"}, or \code{"fail"}).
 }
 \description{
-Parses inline statistical claims in \code{.qmd}, \code{.Rmd}, or \code{.md} prose (point
-estimates, standard errors, p-values, confidence intervals, test statistics,
-sample sizes, \eqn{R^2}, AIC/BIC) and cross-checks them against fitted R
-model objects (\code{lm}, \code{glm}, \code{lmerMod}, \code{htest}, or tidy summary data frames).
-Detects exact value mismatches, sign flips, rounding discrepancies, stale
-sample sizes, and violated p-value inequalities.
+Parses inline prose and Markdown/LaTeX tables in \code{.qmd}, \code{.Rmd}, \code{.md}, or
+\code{.tex} manuscripts—covering point estimates, standard errors, p-values,
+confidence intervals, test statistics (\code{t}, \code{z}, \code{F}, \code{chi2}, \code{r}), odds
+ratios (\code{OR}), sample sizes (\code{N}), \eqn{R^2}, and AIC/BIC—and cross-checks
+them against fitted R model objects (\code{lm}, \code{glm}, \code{lmerMod}, \code{htest}, or
+tidy summary data frames). Also performs \strong{internal arithmetic
+cross-checking} (verifying that reported \code{t}/\code{z} matches \code{b / SE} and that
+reported \verb{95\% CI} bounds are consistent with \code{b} and \code{SE} up to rounding
+intervals), which works even for untagged claims or when \code{models = NULL}.
 }
 \details{
-Supports both explicit annotations for zero-ambiguity binding:
+Supports explicit annotations for zero-ambiguity binding:
 \itemize{
 \item HTML comment anchors: \verb{<!-- statci: model=fit1 term=x1 -->}
+\item LaTeX comment anchors: \verb{\% statci: model=fit1 term=x1}
 \item Quarto inline spans: \verb{[b = 0.42, SE = 0.11, p = .003]\{.statci model="fit1" term="x1"\}}
 }
-
-and automatic untagged prose matching (matching term names mentioned in prose
-or single-model/cohesive clause matching).
 }
 \examples{
 fit <- lm(mpg ~ wt, data = mtcars)

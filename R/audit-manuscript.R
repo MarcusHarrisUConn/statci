@@ -1,28 +1,30 @@
-# Manuscript-to-Code Consistency Auditor for Quarto (.qmd) and RMarkdown (.Rmd)
+# Manuscript-to-Code Consistency Auditor for Quarto (.qmd), RMarkdown (.Rmd), and LaTeX (.tex)
 
-#' Audit a Quarto/RMarkdown manuscript against saved R model objects
+#' Audit a Quarto, RMarkdown, or LaTeX manuscript against saved R model objects
 #'
-#' Parses inline statistical claims in `.qmd`, `.Rmd`, or `.md` prose (point
-#' estimates, standard errors, p-values, confidence intervals, test statistics,
-#' sample sizes, \eqn{R^2}, AIC/BIC) and cross-checks them against fitted R
-#' model objects (`lm`, `glm`, `lmerMod`, `htest`, or tidy summary data frames).
-#' Detects exact value mismatches, sign flips, rounding discrepancies, stale
-#' sample sizes, and violated p-value inequalities.
+#' Parses inline prose and Markdown/LaTeX tables in `.qmd`, `.Rmd`, `.md`, or
+#' `.tex` manuscripts—covering point estimates, standard errors, p-values,
+#' confidence intervals, test statistics (`t`, `z`, `F`, `chi2`, `r`), odds
+#' ratios (`OR`), sample sizes (`N`), \eqn{R^2}, and AIC/BIC—and cross-checks
+#' them against fitted R model objects (`lm`, `glm`, `lmerMod`, `htest`, or
+#' tidy summary data frames). Also performs **internal arithmetic
+#' cross-checking** (verifying that reported `t`/`z` matches `b / SE` and that
+#' reported `95% CI` bounds are consistent with `b` and `SE` up to rounding
+#' intervals), which works even for untagged claims or when `models = NULL`.
 #'
-#' Supports both explicit annotations for zero-ambiguity binding:
+#' Supports explicit annotations for zero-ambiguity binding:
 #' - HTML comment anchors: `<!-- statci: model=fit1 term=x1 -->`
+#' - LaTeX comment anchors: `% statci: model=fit1 term=x1`
 #' - Quarto inline spans: `[b = 0.42, SE = 0.11, p = .003]{.statci model="fit1" term="x1"}`
 #'
-#' and automatic untagged prose matching (matching term names mentioned in prose
-#' or single-model/cohesive clause matching).
-#'
-#' @param manuscript Path to a `.qmd`, `.Rmd`, or `.md` file.
-#' @param models One of:
+#' @param manuscript Path to a `.qmd`, `.Rmd`, `.md`, or `.tex` file.
+#' @param models Optional saved models to cross-check against. One of:
 #'   - A named list of fitted model objects (`lm`, `glm`, `lmerMod`, `htest`)
 #'     or tidy summary data frames;
 #'   - A single fitted model object or tidy summary data frame;
 #'   - Path to an `.rds` file containing a model or named list of models;
-#'   - Path to a directory containing `.rds` model files (keyed by filename stem).
+#'   - Path to a directory containing `.rds` model files (keyed by filename stem);
+#'   - `NULL` to run internal arithmetic consistency checks only.
 #' @param tol_extra Non-negative numeric extra tolerance added on top of the
 #'   automatic rounding half-unit (`0.5 * 10^(-decimals)`). Default `0`.
 #' @param warn_rounding Logical; if `TRUE` (default), values off by at most one
@@ -30,10 +32,14 @@
 #'   (`rounding_discrepancy`) rather than `"fail"`.
 #' @param default_model Optional default model name used for untagged claims
 #'   when multiple models are provided.
+#' @param check_internal Logical; if `TRUE` (default), run interval-arithmetic
+#'   internal consistency checks (`t` vs `b / SE`, `95% CI` midpoint & width
+#'   vs `b` and `SE`) on every claim group and table row.
 #'
 #' @return An S3 object of class `"statci_manuscript_audit"` containing `checks`
-#'   (a [tibble::tibble]), `summary`, `manuscript`, `models_checked`, and
-#'   overall `status` (`"pass"`, `"warn"`, or `"fail"`).
+#'   (model comparison [tibble::tibble]), `internal_checks` (internal arithmetic
+#'   [tibble::tibble]), `summary`, `manuscript`, `models_checked`, and overall
+#'   `status` (`"pass"`, `"warn"`, or `"fail"`).
 #' @export
 #'
 #' @examples
@@ -45,27 +51,35 @@
 #' )
 #' audit_manuscript_text(txt, models = list(fit = fit))
 audit_manuscript <- function(manuscript,
-                             models,
+                             models = NULL,
                              tol_extra = 0,
                              warn_rounding = TRUE,
-                             default_model = NULL) {
+                             default_model = NULL,
+                             check_internal = TRUE) {
   validate_existing_file(manuscript, arg = "manuscript")
   lines <- readLines(manuscript, warn = FALSE, encoding = "UTF-8")
+  ext <- tolower(tools::file_ext(manuscript))
+  fmt <- if (identical(ext, "tex")) "tex" else "markdown"
   audit_manuscript_lines(
     lines = lines,
     source_label = manuscript,
     models = models,
     tol_extra = tol_extra,
     warn_rounding = warn_rounding,
-    default_model = default_model
+    default_model = default_model,
+    format = fmt,
+    check_internal = check_internal
   )
 }
 
-#' Audit manuscript prose supplied as an in-memory string
+#' Audit manuscript prose or tables supplied as an in-memory string
 #'
-#' In-memory counterpart to [audit_manuscript()].
+#' In-memory counterpart to [audit_manuscript()], supporting Markdown/Quarto
+#' and LaTeX (`.tex`) prose, tables, and internal arithmetic verification.
 #'
 #' @param text Character scalar or vector of manuscript lines.
+#' @param format Document format: `"auto"` (detects LaTeX commands
+#'   automatically), `"markdown"` (Quarto/RMarkdown), or `"tex"` (LaTeX).
 #' @inheritParams audit_manuscript
 #'
 #' @return An S3 object of class `"statci_manuscript_audit"`.
@@ -78,22 +92,35 @@ audit_manuscript <- function(manuscript,
 #'   models = list(fit = fit)
 #' )
 audit_manuscript_text <- function(text,
-                                  models,
+                                  models = NULL,
                                   tol_extra = 0,
                                   warn_rounding = TRUE,
-                                  default_model = NULL) {
+                                  default_model = NULL,
+                                  format = c("auto", "markdown", "tex"),
+                                  check_internal = TRUE) {
+  format <- match.arg(format)
   if (!is.character(text)) {
     rlang::abort("`text` must be a character vector.")
   }
   lines <- unlist(strsplit(paste(text, collapse = "\n"), "\n", fixed = TRUE))
   if (length(lines) == 0L) lines <- ""
+  if (format == "auto") {
+    joined <- paste(lines, collapse = "\n")
+    format <- if (grepl("\\\\begin\\{(document|tabular|table)\\}|\\\\section\\{|%\\s*statci:", joined, perl = TRUE)) {
+      "tex"
+    } else {
+      "markdown"
+    }
+  }
   audit_manuscript_lines(
     lines = lines,
     source_label = "<text>",
     models = models,
     tol_extra = tol_extra,
     warn_rounding = warn_rounding,
-    default_model = default_model
+    default_model = default_model,
+    format = format,
+    check_internal = check_internal
   )
 }
 
@@ -102,6 +129,9 @@ audit_manuscript_text <- function(text,
 # ---------------------------------------------------------------------------
 
 load_models_input <- function(models) {
+  if (is.null(models)) {
+    return(list())
+  }
   if (is.character(models) && length(models) == 1L) {
     assert_clean_scalar_string(models, "models")
     if (dir.exists(models)) {
@@ -148,13 +178,14 @@ load_models_input <- function(models) {
     return(models)
   }
 
-  rlang::abort("`models` must be a model object, a named list of models, an `.rds` file, or a directory of `.rds` files.")
+  rlang::abort("`models` must be NULL, a model object, a named list of models, an `.rds` file, or a directory of `.rds` files.")
 }
 
 extract_single_model <- function(m) {
   fit_stats <- list(
     n = NA_real_, r_squared = NA_real_, adj_r_squared = NA_real_,
-    aic = NA_real_, bic = NA_real_, df_residual = NA_real_, r = NA_real_
+    aic = NA_real_, bic = NA_real_, df_residual = NA_real_, r = NA_real_,
+    f_stat = NA_real_, chisq = NA_real_
   )
 
   # 1. lmerMod / glmerMod / lmerModLmerTest
@@ -224,13 +255,16 @@ extract_single_model <- function(m) {
     fit_stats$n <- tryCatch(as.numeric(stats::nobs(m)), error = function(e) NA_real_)
     fit_stats$r_squared <- sm_obj$r.squared %||% NA_real_
     fit_stats$adj_r_squared <- sm_obj$adj.r.squared %||% NA_real_
+    if (!is.null(sm_obj$fstatistic) && length(sm_obj$fstatistic) >= 1L) {
+      fit_stats$f_stat <- as.numeric(sm_obj$fstatistic[1L])
+    }
     fit_stats$aic <- tryCatch(as.numeric(stats::AIC(m)), error = function(e) NA_real_)
     fit_stats$bic <- tryCatch(as.numeric(stats::BIC(m)), error = function(e) NA_real_)
     fit_stats$df_residual <- df_res
     return(list(terms = terms_tbl, fit = fit_stats, class = class(m)[1L]))
   }
 
-  # 3. htest (t.test, cor.test, wilcox.test, chisq.test)
+  # 3. htest (t.test, cor.test, wilcox.test, chisq.test, var.test)
   if (inherits(m, "htest")) {
     est <- as.numeric(m$estimate)
     if (length(est) == 2L && grepl("Two Sample|Welch", m$method %||% "")) {
@@ -248,9 +282,19 @@ extract_single_model <- function(m) {
     df_v <- if (!is.null(m$parameter)) as.numeric(m$parameter)[1L] else NA_real_
     pval <- if (!is.null(m$p.value)) as.numeric(m$p.value)[1L] else NA_real_
 
-    if (grepl("correlation", m$method %||% "", ignore.case = TRUE)) {
+    meth <- m$method %||% ""
+    if (grepl("correlation", meth, ignore.case = TRUE)) {
       fit_stats$r <- est
       if (!is.na(df_v)) fit_stats$n <- df_v + 2
+    }
+    if (grepl("Chi-squared", meth, ignore.case = TRUE) ||
+        identical(names(m$statistic), "X-squared")) {
+      fit_stats$chisq <- stat_v
+      if (!is.null(m$observed)) fit_stats$n <- sum(m$observed)
+    }
+    if (grepl("F test", meth, ignore.case = TRUE) ||
+        identical(names(m$statistic), "F")) {
+      fit_stats$f_stat <- stat_v
     }
     terms_tbl <- tibble::tibble(
       term = "test",
@@ -287,6 +331,10 @@ extract_single_model <- function(m) {
     if (!is.null(n_v) && length(n_v) > 0L) fit_stats$n <- as.numeric(n_v[1L])
     r2_v <- pick(c("r_squared", "r.squared", "r2"))
     if (!is.null(r2_v) && length(r2_v) > 0L) fit_stats$r_squared <- as.numeric(r2_v[1L])
+    f_v <- pick(c("f_stat", "f.value", "f"))
+    if (!is.null(f_v) && length(f_v) > 0L) fit_stats$f_stat <- as.numeric(f_v[1L])
+    chi_v <- pick(c("chisq", "chi2", "x2"))
+    if (!is.null(chi_v) && length(chi_v) > 0L) fit_stats$chisq <- as.numeric(chi_v[1L])
 
     terms_tbl <- tibble::tibble(
       term = as.character(term_v),
@@ -306,14 +354,43 @@ extract_single_model <- function(m) {
 }
 
 # ---------------------------------------------------------------------------
-# Prose stripping & claim extraction
+# Prose stripping (Markdown & LaTeX) + Table Parsers
 # ---------------------------------------------------------------------------
 
-strip_non_prose_lines <- function(lines) {
+strip_non_prose_lines <- function(lines, format = "markdown") {
   n <- length(lines)
   keep <- rep(TRUE, n)
 
-  # Strip YAML frontmatter at top of document
+  if (format == "tex") {
+    in_verb <- FALSE
+    for (i in seq_len(n)) {
+      ln <- lines[i]
+      if (!in_verb && grepl("\\\\begin\\{(verbatim|lstlisting|minted)\\}", ln)) {
+        in_verb <- TRUE
+        keep[i] <- FALSE
+        next
+      }
+      if (in_verb) {
+        keep[i] <- FALSE
+        if (grepl("\\\\end\\{(verbatim|lstlisting|minted)\\}", ln)) {
+          in_verb <- FALSE
+        }
+        next
+      }
+    }
+    out <- lines
+    out[!keep] <- ""
+    # Strip LaTeX % comments EXCEPT `% statci:` anchor comments (keep those for tag parser!)
+    for (i in seq_len(n)) {
+      if (!nzchar(out[i])) next
+      if (grepl("^[[:space:]]*%[[:space:]]*statci:", out[i])) next
+      # Remove unescaped `% ...` trailing comments
+      out[i] <- sub("(?<!\\\\)%.*$", "", out[i], perl = TRUE)
+    }
+    return(out)
+  }
+
+  # Strip YAML frontmatter at top of Markdown/Quarto document
   if (n >= 2L && grepl("^---[[:space:]]*$", lines[1L])) {
     end_yaml <- which(grepl("^(---|\\.\\.\\.)[[:space:]]*$", lines[-1L]))
     if (length(end_yaml) > 0L) {
@@ -361,6 +438,14 @@ normalize_prose_line <- function(s) {
   # Distinguish en-dash (\u2013) used as CI range separator vs leading minus sign
   s <- gsub("(?<=[0-9])\u2013(?=[[:space:]]{0,3}-?[0-9.])", " to ", s, perl = TRUE)
   s <- gsub("\u2013(?=[[:space:]]{0,3}[0-9.])", "-", s, perl = TRUE)
+  # Unwrap common LaTeX inline styling & math macros safely (linear-time bounded)
+  s <- gsub("\\\\(?:textit|textbf|emph|mathrm|text|mathbf)\\{([^{}]{1,80})\\}", "\\1", s, perl = TRUE)
+  s <- gsub("\\\\leq\\b", "<=", s, perl = TRUE)
+  s <- gsub("\\\\geq\\b", ">=", s, perl = TRUE)
+  s <- gsub("\\\\[,;!]", " ", s, perl = TRUE)
+  s <- gsub("\\\\chi\\^\\{?2\\}?", "chi2", s, perl = TRUE)
+  s <- gsub("\u03c7\u00b2", "chi2", s, fixed = TRUE)
+  s <- gsub("\u03c7\\^2", "chi2", s, perl = TRUE)
   # Strip bounded markdown italics/bold/inline math around metric symbols (linear-time)
   s <- gsub("\\*{1,2}([A-Za-z]{1,20})\\*{1,2}", "\\1", s, perl = TRUE)
   s <- gsub("_([A-Za-z]{1,20})_", "\\1", s, perl = TRUE)
@@ -368,7 +453,7 @@ normalize_prose_line <- function(s) {
   s <- gsub("\\\\beta\\b", "beta", s, perl = TRUE)
   s <- gsub("\u03b2", "beta", s, fixed = TRUE)
   s <- gsub("R\u00b2", "R2", s, fixed = TRUE)
-  # Normalize LaTeX/Unicode scientific notation `1.2 \times 10^{-4}` or `1.2 × 10^-4` -> `1.2e-4`
+  # Normalize LaTeX/Unicode scientific notation `1.2 \times 10^{-4}` or `1.2 x 10^-4` -> `1.2e-4`
   s <- gsub(
     "(-?(?:[0-9]{1,12}\\.[0-9]{1,12}|\\.[0-9]{1,12}|[0-9]{1,12}))[[:space:]]{0,4}(?:\\\\times|\u00d7|[xX])[[:space:]]{0,4}10\\^\\{?([+-]?[0-9]{1,4})\\}?",
     "\\1e\\2",
@@ -401,15 +486,95 @@ parse_tag_attrs <- function(attr_str) {
   out
 }
 
+# Map a table column header string to a canonical statci metric name
+map_table_header_metric <- function(hdr) {
+  h <- tolower(trimws(gsub("[`*_$\\\\]", "", hdr)))
+  h <- gsub("[[:space:]]+", " ", h)
+  if (h %in% c("term", "variable", "predictor", "parameter", "effect", "covariate", "factor")) return("term")
+  if (h %in% c("b", "beta", "est", "est.", "estimate", "coef", "coef.", "coefficient", "slope")) return("estimate")
+  if (h %in% c("or", "odds ratio", "exp(b)")) return("or")
+  if (h %in% c("se", "s.e.", "std. error", "std.error", "stderr", "standard error")) return("se")
+  if (h %in% c("t", "z", "t value", "z value", "t-value", "z-value", "stat", "statistic", "t/z")) return("statistic")
+  if (h %in% c("p", "p-value", "p.value", "p value", "pval", "pr(>|t|)", "pr(>|z|)")) return("p_value")
+  if (grepl("^(9[059]%\\s*)?ci$|confidence interval", h)) return("ci_pair")
+  if (h %in% c("ci low", "ci_low", "ci_lower", "conf.low", "lower", "lower ci", "2.5%", "ll")) return("ci_lower")
+  if (h %in% c("ci high", "ci_high", "ci_upper", "conf.high", "upper", "upper ci", "97.5%", "ul")) return("ci_upper")
+  NA_character_
+}
+
+parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw_line) {
+  term_idx <- which(col_metrics == "term")
+  row_term <- if (length(term_idx) >= 1L && term_idx[1L] <= length(cells)) {
+    trm <- trimws(gsub("^[`*_$]+|[`*_$]+$", "", cells[term_idx[1L]]))
+    trm <- gsub("\\\\_", "_", trm, fixed = TRUE)
+    if (nzchar(trm)) trm else NA_character_
+  } else {
+    NA_character_
+  }
+  if (is.na(row_term) || !nzchar(row_term)) return(NULL)
+
+  num_signed <- "[+-]?(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
+  claims <- list()
+  add_tbl_claim <- function(metric, op, raw_val) {
+    clean_num <- gsub(",", "", trimws(raw_val), fixed = TRUE)
+    val <- suppressWarnings(as.numeric(clean_num))
+    if (is.na(val) || !is.finite(val)) return()
+    claims[[length(claims) + 1L]] <<- list(
+      line = as.integer(line_num),
+      model = tag_model,
+      term = row_term,
+      metric = metric,
+      op = op,
+      reported_raw = trimws(raw_val),
+      reported = val,
+      df = NA_real_,
+      unit = rounding_unit(clean_num),
+      has_fraction = grepl("[.eE]", clean_num),
+      context = substr(trimws(raw_line), 1L, 300L)
+    )
+  }
+
+  for (j in seq_along(col_metrics)) {
+    m <- col_metrics[j]
+    if (is.na(m) || m == "term" || j > length(cells)) next
+    cell <- normalize_prose_line(trimws(cells[j]))
+    if (!nzchar(cell) || cell %in% c("-", "--", "\u2014", "NA", ".")) next
+
+    if (m == "ci_pair") {
+      pair_pat <- paste0("[\\[\\(]?[[:space:]]{0,3}(", num_signed, ")[[:space:]]{0,3}(?:,|to|[[:space:]]-[[:space:]])[[:space:]]{0,3}(", num_signed, ")[[:space:]]{0,3}[\\]\\)]?")
+      cap <- regmatches(cell, regexec(pair_pat, cell, perl = TRUE))[[1L]]
+      if (length(cap) >= 3L) {
+        add_tbl_claim("ci_lower", "=", cap[2L])
+        add_tbl_claim("ci_upper", "=", cap[3L])
+      }
+    } else if (m == "p_value") {
+      p_cell_pat <- paste0("^(<=|>=|=|<|>)?[[:space:]]{0,3}(", num_signed, ")")
+      cap <- regmatches(cell, regexec(p_cell_pat, cell, perl = TRUE))[[1L]]
+      if (length(cap) >= 3L) {
+        op <- if (nzchar(cap[2L])) cap[2L] else "="
+        add_tbl_claim("p_value", op, cap[3L])
+      }
+    } else {
+      cap <- regmatches(cell, regexec(paste0("^(", num_signed, ")"), cell, perl = TRUE))[[1L]]
+      if (length(cap) >= 2L) {
+        add_tbl_claim(m, "=", cap[2L])
+      }
+    }
+  }
+
+  if (length(claims) == 0L) return(NULL)
+  list(line = as.integer(line_num), text = raw_line, tag_model = tag_model, tag_term = row_term, claims = claims)
+}
+
 extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_, tag_term = NA_character_) {
   norm <- normalize_prose_line(seg)
   claims <- list()
 
   # Strictly linear-time bounded numeric patterns (supports decimals, leading-dot, and scientific notation)
-  num_signed <- "-?(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
+  num_signed <- "[+-]?(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
   num_pos <- "(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
 
-  add_claim <- function(metric, op, raw_val) {
+  add_claim <- function(metric, op, raw_val, extra_df = NA_real_) {
     clean_num <- gsub(",", "", trimws(raw_val), fixed = TRUE)
     val <- suppressWarnings(as.numeric(clean_num))
     if (is.na(val) || !is.finite(val)) return()
@@ -421,6 +586,7 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
       op = op,
       reported_raw = trimws(raw_val),
       reported = val,
+      df = extra_df,
       unit = rounding_unit(clean_num),
       has_fraction = grepl("[.eE]", clean_num),
       context = substr(trimws(seg), 1L, 300L)
@@ -503,12 +669,37 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
     for (mt in regmatches(norm, m_st)[[1L]]) {
       cap <- regmatches(mt, regexec(stat_pat, mt, perl = TRUE))[[1L]]
       if (length(cap) >= 4L) {
-        add_claim("statistic", "=", cap[4L])
+        df_num <- suppressWarnings(as.numeric(cap[3L]))
+        add_claim("statistic", "=", cap[4L], extra_df = df_num)
       }
     }
   }
 
-  # 7. Correlation: r = .34, r = -.42, r(98) = -0.41
+  # 7. APA F-statistic: F(df1, df2) = 12.45
+  f_pat <- paste0(
+    "\\bF[[:space:]]{0,3}\\([[:space:]]{0,3}[0-9]{1,6}(?:\\.[0-9]{1,3})?[[:space:]]{0,3},[[:space:]]{0,3}[0-9]{1,8}(?:\\.[0-9]{1,3})?[[:space:]]{0,3}\\)[[:space:]]{0,4}=[[:space:]]{0,4}(",
+    num_pos, ")"
+  )
+  m_f <- gregexpr(f_pat, norm, perl = TRUE)
+  if (m_f[[1L]][1L] != -1L) {
+    for (mt in regmatches(norm, m_f)[[1L]]) {
+      add_claim("f_stat", "=", sub("^[^=]*=[[:space:]]*", "", mt))
+    }
+  }
+
+  # 8. APA Chi-squared: chi2(df) = 8.42, X2(df) = 8.42, chi^2(df) = ...
+  chi_pat <- paste0(
+    "\\b(?:chi\\^?2|X\\^?2)[[:space:]]{0,3}(?:\\([[:space:]]{0,3}[0-9]{1,6}(?:\\.[0-9]{1,3})?(?:,[[:space:]]{0,3}[Nn][[:space:]]{0,2}=[[:space:]]{0,2}[0-9,]{1,10})?[[:space:]]{0,3}\\))?[[:space:]]{0,4}=[[:space:]]{0,4}(",
+    num_pos, ")"
+  )
+  m_chi <- gregexpr(chi_pat, norm, perl = TRUE)
+  if (m_chi[[1L]][1L] != -1L) {
+    for (mt in regmatches(norm, m_chi)[[1L]]) {
+      add_claim("chisq", "=", sub("^[^=]*=[[:space:]]*", "", mt))
+    }
+  }
+
+  # 9. Correlation: r = .34, r = -.42, r(98) = -0.41
   r_pat <- paste0(
     "\\br[[:space:]]{0,3}(?:\\([[:space:]]{0,3}[0-9]{1,8}(?:\\.[0-9]{1,4})?[[:space:]]{0,3}\\))?[[:space:]]{0,4}=[[:space:]]{0,4}(",
     num_signed, ")"
@@ -524,7 +715,7 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
     }
   }
 
-  # 8. Sample size: N = 250, n = 1,250
+  # 10. Sample size: N = 250, n = 1,250
   n_pat <- "\\b[Nn][[:space:]]{0,4}=[[:space:]]{0,4}([0-9][0-9,]{0,14})\\b"
   m_n <- gregexpr(n_pat, norm, perl = TRUE)
   if (m_n[[1L]][1L] != -1L) {
@@ -534,7 +725,7 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
     }
   }
 
-  # 9. R-squared: R^2 = 0.45, R2 = .45
+  # 11. R-squared: R^2 = 0.45, R2 = .45
   r2_pat <- paste0("\\bR\\^?\\{?2\\}?[[:space:]]{0,4}=[[:space:]]{0,4}(", num_pos, ")")
   m_r2 <- gregexpr(r2_pat, norm, perl = TRUE)
   if (m_r2[[1L]][1L] != -1L) {
@@ -544,7 +735,7 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
     }
   }
 
-  # 10. AIC / BIC
+  # 12. AIC / BIC
   aic_pat <- paste0("\\bAIC[[:space:]]{0,4}=[[:space:]]{0,4}(", num_signed, ")")
   m_aic <- gregexpr(aic_pat, norm, perl = TRUE)
   if (m_aic[[1L]][1L] != -1L) {
@@ -564,8 +755,6 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
 }
 
 #' Compute the place-value unit (1 ulp in decimal) of a reported numeric string
-#' Handles fixed-point (`0.42` -> 1e-2, `.003` -> 1e-3) and scientific notation
-#' (`1.2e-4` -> 1e-5, `3e-4` -> 1e-4).
 #' @noRd
 rounding_unit <- function(num_str) {
   s <- trimws(num_str)
@@ -583,51 +772,292 @@ rounding_unit <- function(num_str) {
 }
 
 # ---------------------------------------------------------------------------
-# Core manuscript auditing logic
+# Internal Arithmetic Consistency Engine (Interval Arithmetic)
 # ---------------------------------------------------------------------------
 
-audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_rounding, default_model) {
+evaluate_internal_arithmetic <- function(claim_groups, tol_extra = 0) {
+  rows <- list()
+  add_ic <- function(line, term, check_type, reported_expr, expected_range, status, detail) {
+    rows[[length(rows) + 1L]] <<- tibble::tibble(
+      line = as.integer(line),
+      term = term %||% NA_character_,
+      check_type = check_type,
+      reported_expr = reported_expr,
+      expected_range = expected_range,
+      status = status,
+      detail = detail
+    )
+  }
+
+  for (grp in claim_groups) {
+    cl_list <- grp$claims
+    metrics <- vapply(cl_list, `[[`, character(1L), "metric")
+    b_idx <- which(metrics == "estimate")
+    se_idx <- which(metrics == "se")
+    t_idx <- which(metrics == "statistic")
+    cil_idx <- which(metrics == "ci_lower")
+    ciu_idx <- which(metrics == "ci_upper")
+
+    # (a) Wald ratio check: t == b / SE (accounting for rounding intervals!)
+    if (length(b_idx) == 1L && length(se_idx) == 1L && length(t_idx) == 1L) {
+      cb <- cl_list[[b_idx]]
+      cs <- cl_list[[se_idx]]
+      ct <- cl_list[[t_idx]]
+      db <- 0.5 * (cb$unit %||% 0.01) + tol_extra
+      ds <- 0.5 * (cs$unit %||% 0.01) + tol_extra
+      dt <- 0.5 * (ct$unit %||% 0.01) + tol_extra
+      if (cs$reported > ds + 1e-12) {
+        b_rng <- c(cb$reported - db, cb$reported + db)
+        s_rng <- c(max(1e-12, cs$reported - ds), cs$reported + ds)
+        corners <- as.vector(outer(b_rng, s_rng, "/"))
+        t_lo <- min(corners) - dt - 1e-9
+        t_hi <- max(corners) + dt + 1e-9
+        ok <- ct$reported >= t_lo && ct$reported <= t_hi
+        # Allow minor warning band if off by <= 2*dt
+        near_ok <- ct$reported >= (t_lo - 2 * dt) && ct$reported <= (t_hi + 2 * dt)
+        st <- if (ok) "pass" else if (near_ok) "warn" else "fail"
+        add_ic(
+          line = grp$line,
+          term = grp$tag_term,
+          check_type = "internal_t_ratio",
+          reported_expr = paste0("b=", cb$reported_raw, ", SE=", cs$reported_raw, ", t=", ct$reported_raw),
+          expected_range = paste0("[", fmt_num(min(corners), 2L), ", ", fmt_num(max(corners), 2L), "]"),
+          status = st,
+          detail = if (ok) "t consistent with b / SE within rounding" else paste0(
+            "Reported t = ", ct$reported_raw, " inconsistent with b / SE (",
+            fmt_num(cb$reported / cs$reported, 2L), ")"
+          )
+        )
+      }
+    }
+
+    # (b) Confidence interval internal checks: ordering, midpoint symmetry, and SE half-width
+    if (length(cil_idx) == 1L && length(ciu_idx) == 1L) {
+      cl <- cl_list[[cil_idx]]
+      cu <- cl_list[[ciu_idx]]
+      dl <- 0.5 * (cl$unit %||% 0.01) + tol_extra
+      du <- 0.5 * (cu$unit %||% 0.01) + tol_extra
+
+      # Bound ordering
+      if (cl$reported > cu$reported + 1e-9) {
+        add_ic(
+          line = grp$line,
+          term = grp$tag_term,
+          check_type = "internal_ci_order",
+          reported_expr = paste0("CI [", cl$reported_raw, ", ", cu$reported_raw, "]"),
+          expected_range = "lower <= upper",
+          status = "fail",
+          detail = "Confidence interval lower bound exceeds upper bound."
+        )
+      } else if (length(b_idx) == 1L) {
+        cb <- cl_list[[b_idx]]
+        db <- 0.5 * (cb$unit %||% 0.01) + tol_extra
+        mid <- 0.5 * (cl$reported + cu$reported)
+        mid_tol <- db + 0.5 * (dl + du) + 1e-9
+        # Only check midpoint symmetry when b is not obviously an exponentiated OR
+        if (abs(mid - cb$reported) > mid_tol) {
+          # Allow warn band if off by small rounding jitter (<= 2x tol)
+          st <- if (abs(mid - cb$reported) <= 2 * mid_tol) "warn" else "fail"
+          add_ic(
+            line = grp$line,
+            term = grp$tag_term,
+            check_type = "internal_ci_midpoint",
+            reported_expr = paste0("b=", cb$reported_raw, ", CI [", cl$reported_raw, ", ", cu$reported_raw, "]"),
+            expected_range = paste0("midpoint=", fmt_num(mid, 3L), " (+/- ", fmt_num(mid_tol, 3L), ")"),
+            status = st,
+            detail = paste0("CI midpoint (", fmt_num(mid, 3L), ") disagrees with reported b (", cb$reported_raw, ").")
+          )
+        } else {
+          add_ic(
+            line = grp$line,
+            term = grp$tag_term,
+            check_type = "internal_ci_midpoint",
+            reported_expr = paste0("b=", cb$reported_raw, ", CI [", cl$reported_raw, ", ", cu$reported_raw, "]"),
+            expected_range = paste0("midpoint=", fmt_num(mid, 3L)),
+            status = "pass",
+            detail = "CI midpoint consistent with reported b within rounding"
+          )
+        }
+
+        # Half-width vs SE check (1.96*SE for normal up to ~2.78*SE for df >= 4)
+        if (length(se_idx) == 1L) {
+          cs <- cl_list[[se_idx]]
+          ds <- 0.5 * (cs$unit %||% 0.01) + tol_extra
+          if (cs$reported > ds + 1e-12) {
+            hw <- 0.5 * (cu$reported - cl$reported)
+            hw_tol <- 0.5 * (dl + du) + 1e-9
+            # Use exact t_crit if df was reported, else generous [1.959, 2.78] interval covering df >= 4..Inf
+            rep_df <- if (length(t_idx) == 1L) (cl_list[[t_idx]]$df %||% NA_real_) else NA_real_
+            if (!is.na(rep_df) && is.finite(rep_df) && rep_df >= 1) {
+              crit_lo <- stats::qt(0.975, df = rep_df) - 0.02
+              crit_hi <- stats::qt(0.975, df = rep_df) + 0.02
+            } else {
+              crit_lo <- 1.94
+              crit_hi <- 2.80
+            }
+            exp_lo <- crit_lo * max(0, cs$reported - ds) - hw_tol
+            exp_hi <- crit_hi * (cs$reported + ds) + hw_tol
+            ok_hw <- hw >= exp_lo && hw <= exp_hi
+            add_ic(
+              line = grp$line,
+              term = grp$tag_term,
+              check_type = "internal_ci_width",
+              reported_expr = paste0("SE=", cs$reported_raw, ", CI [", cl$reported_raw, ", ", cu$reported_raw, "]"),
+              expected_range = paste0("half-width in [", fmt_num(exp_lo, 3L), ", ", fmt_num(exp_hi, 3L), "]"),
+              status = if (ok_hw) "pass" else "fail",
+              detail = if (ok_hw) "CI half-width consistent with SE" else paste0(
+                "CI half-width (", fmt_num(hw, 3L), ") inconsistent with SE (", cs$reported_raw, ")."
+              )
+            )
+          }
+        }
+      }
+    }
+  }
+
+  if (length(rows) == 0L) {
+    return(tibble::tibble(
+      line = integer(0), term = character(0), check_type = character(0),
+      reported_expr = character(0), expected_range = character(0),
+      status = character(0), detail = character(0)
+    ))
+  }
+  tibble::as_tibble(do.call(rbind, rows))
+}
+
+# ---------------------------------------------------------------------------
+# Core manuscript auditing logic (Prose + Markdown Tables + LaTeX Tables)
+# ---------------------------------------------------------------------------
+
+audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_rounding,
+                                   default_model, format = "markdown", check_internal = TRUE) {
   raw_models <- load_models_input(models)
   catalog <- lapply(raw_models, extract_single_model)
   model_names <- names(catalog)
-  if (!is.null(default_model) && !(default_model %in% model_names)) {
+  if (!is.null(default_model) && length(model_names) > 0L && !(default_model %in% model_names)) {
     rlang::abort(paste0("`default_model` (`", default_model, "`) not found in `models`."))
   }
 
-  prose <- strip_non_prose_lines(lines)
+  prose <- strip_non_prose_lines(lines, format = format)
 
-  # Parse lines into claim groups (respecting inline spans and HTML comments)
   claim_groups <- list()
   pending_tag <- NULL
 
   span_pat <- "\\[([^\\]]{1,500})\\]\\{\\.statci[[:space:]]{1,4}([^}]{1,250})\\}"
-  comment_pat <- "<!--+[[:space:]]{0,4}statci:[[:space:]]{0,4}([^<>]{0,250}?)--+>"
+  html_comment_pat <- "<!--+[[:space:]]{0,4}statci:[[:space:]]{0,4}([^<>]{0,250}?)--+>"
+  tex_comment_pat <- "^[[:space:]]*%[[:space:]]{0,4}statci:[[:space:]]{0,4}(.{1,250})$"
 
-  for (i in seq_along(prose)) {
+  # Track Markdown / LaTeX table parsing state
+  in_md_table <- FALSE
+  md_col_metrics <- NULL
+  md_table_model <- NA_character_
+
+  in_tex_tabular <- FALSE
+  tex_col_metrics <- NULL
+  tex_table_model <- NA_character_
+
+  i <- 1L
+  n_lines <- length(prose)
+  while (i <= n_lines) {
     ln <- prose[i]
-    if (!nzchar(trimws(ln))) next
+    trimmed <- trimws(ln)
 
-    # 1. Check HTML comment tag: <!-- statci: model=... term=... -->
-    cm <- regexec(comment_pat, ln, perl = TRUE)
+    if (!nzchar(trimmed)) {
+      in_md_table <- FALSE
+      md_col_metrics <- NULL
+      i <- i + 1L
+      next
+    }
+
+    # 1. Check HTML or LaTeX comment anchor tag
+    is_tex_tag <- format == "tex" && grepl(tex_comment_pat, ln, perl = TRUE)
+    if (is_tex_tag) {
+      cap <- regmatches(ln, regexec(tex_comment_pat, ln, perl = TRUE))[[1L]]
+      pending_tag <- parse_tag_attrs(cap[2L])
+      i <- i + 1L
+      next
+    }
+    cm <- regexec(html_comment_pat, ln, perl = TRUE)
     ccap <- regmatches(ln, cm)[[1L]]
     line_tag <- pending_tag
     if (length(ccap) >= 2L) {
       attrs <- parse_tag_attrs(ccap[2L])
-      remainder <- trimws(sub(comment_pat, "", ln, perl = TRUE))
+      remainder <- trimws(sub(html_comment_pat, "", ln, perl = TRUE))
       if (!nzchar(remainder)) {
-        # Tag applies to the next non-empty prose line
         pending_tag <- attrs
+        i <- i + 1L
         next
       } else {
         line_tag <- attrs
         pending_tag <- NULL
         ln <- remainder
+        trimmed <- trimws(ln)
       }
     } else {
       pending_tag <- NULL
     }
 
-    # 2. Extract any Quarto inline spans `[...]{.statci ...}` on this line
+    # 2. LaTeX tabular table detection (`\begin{tabular}` ... `\end{tabular}`)
+    if (format == "tex") {
+      if (grepl("\\\\begin\\{tabular\\}", ln)) {
+        in_tex_tabular <- TRUE
+        tex_col_metrics <- NULL
+        tex_table_model <- if (!is.null(line_tag)) line_tag$model else NA_character_
+        i <- i + 1L
+        next
+      }
+      if (in_tex_tabular) {
+        if (grepl("\\\\end\\{tabular\\}", ln)) {
+          in_tex_tabular <- FALSE
+          tex_col_metrics <- NULL
+          i <- i + 1L
+          next
+        }
+        if (grepl("&", ln, fixed = TRUE) && !grepl("^\\\\(hline|toprule|midrule|bottomrule|cline)", trimmed)) {
+          row_clean <- sub("\\\\\\\\.*$", "", trimmed)
+          cells <- trimws(strsplit(row_clean, "&", fixed = TRUE)[[1L]])
+          if (is.null(tex_col_metrics)) {
+            mapped <- vapply(cells, map_table_header_metric, character(1L))
+            if (any(!is.na(mapped))) {
+              tex_col_metrics <- mapped
+            }
+          } else {
+            grp <- parse_table_cell_claims(cells, tex_col_metrics, i, tex_table_model, trimmed)
+            if (!is.null(grp)) claim_groups[[length(claim_groups) + 1L]] <- grp
+          }
+        }
+        i <- i + 1L
+        next
+      }
+    }
+
+    # 3. Markdown / Quarto pipe table detection
+    if (format != "tex" && grepl("^\\|.*\\|$", trimmed)) {
+      if (!in_md_table && i + 1L <= n_lines && grepl("^\\|[[:space:]:|-]+\\|$", trimws(prose[i + 1L]))) {
+        raw_hdr <- sub("^\\|", "", sub("\\|$", "", trimmed))
+        hdr_cells <- trimws(strsplit(raw_hdr, "|", fixed = TRUE)[[1L]])
+        mapped <- vapply(hdr_cells, map_table_header_metric, character(1L))
+        if (any(!is.na(mapped)) && "term" %in% mapped) {
+          in_md_table <- TRUE
+          md_col_metrics <- mapped
+          md_table_model <- if (!is.null(line_tag)) line_tag$model else NA_character_
+          i <- i + 2L # skip header + separator line
+          next
+        }
+      } else if (in_md_table) {
+        raw_row <- sub("^\\|", "", sub("\\|$", "", trimmed))
+        cells <- trimws(strsplit(raw_row, "|", fixed = TRUE)[[1L]])
+        grp <- parse_table_cell_claims(cells, md_col_metrics, i, md_table_model, trimmed)
+        if (!is.null(grp)) claim_groups[[length(claim_groups) + 1L]] <- grp
+        i <- i + 1L
+        next
+      }
+    } else {
+      in_md_table <- FALSE
+      md_col_metrics <- NULL
+    }
+
+    # 4. Extract any Quarto inline spans `[...]{.statci ...}` on this line
     span_hits <- gregexpr(span_pat, ln, perl = TRUE)
     if (span_hits[[1L]][1L] != -1L) {
       spans <- regmatches(ln, span_hits)[[1L]]
@@ -643,11 +1073,10 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
           }
         }
       }
-      # Remove matched spans before checking remaining text on the line
       ln <- gsub(span_pat, "", ln, perl = TRUE)
     }
 
-    # 3. Extract remaining claims on the line
+    # 5. Extract remaining prose claims on the line
     if (nzchar(trimws(ln))) {
       tm <- if (!is.null(line_tag)) line_tag$model else NA_character_
       tt <- if (!is.null(line_tag)) line_tag$term else NA_character_
@@ -658,94 +1087,106 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
         )
       }
     }
+
+    i <- i + 1L
   }
 
-  # Evaluate every claim against the model catalog
+  # Evaluate internal arithmetic consistency across all claim groups
+  internal_checks <- if (isTRUE(check_internal)) {
+    evaluate_internal_arithmetic(claim_groups, tol_extra = tol_extra)
+  } else {
+    tibble::tibble(
+      line = integer(0), term = character(0), check_type = character(0),
+      reported_expr = character(0), expected_range = character(0),
+      status = character(0), detail = character(0)
+    )
+  }
+
+  # Evaluate every claim against the model catalog (when models are supplied)
   check_rows <- list()
 
-  for (grp in claim_groups) {
-    # Resolve target model for the group
-    m_name <- grp$tag_model
-    if (is.na(m_name) || !nzchar(m_name)) {
-      if (!is.null(default_model)) {
-        m_name <- default_model
-      } else if (length(model_names) == 1L) {
-        m_name <- model_names[1L]
-      } else {
-        # Try matching model name mentioned in text
-        mentioned <- model_names[vapply(model_names, function(nm) {
-          grepl(paste0("\\b", nm, "\\b"), grp$text)
-        }, logical(1L))]
-        m_name <- if (length(mentioned) == 1L) mentioned[1L] else model_names[1L]
+  if (length(model_names) > 0L) {
+    fit_metrics <- c("n", "r_squared", "aic", "bic", "f_stat", "chisq")
+
+    for (grp in claim_groups) {
+      m_name <- grp$tag_model
+      if (is.na(m_name) || !nzchar(m_name)) {
+        if (!is.null(default_model)) {
+          m_name <- default_model
+        } else if (length(model_names) == 1L) {
+          m_name <- model_names[1L]
+        } else {
+          mentioned <- model_names[vapply(model_names, function(nm) {
+            grepl(paste0("\\b", nm, "\\b"), grp$text)
+          }, logical(1L))]
+          m_name <- if (length(mentioned) == 1L) mentioned[1L] else model_names[1L]
+        }
       }
-    }
 
-    if (!(m_name %in% model_names)) {
-      for (cl in grp$claims) {
-        check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
-          line = cl$line, model = m_name, term = cl$term %||% NA_character_,
-          metric = cl$metric, op = cl$op, reported_raw = cl$reported_raw,
-          reported = cl$reported, actual = NA_real_, diff = NA_real_,
-          tolerance = NA_real_, issue_type = "missing_model",
-          status = "fail", context = cl$context
-        )
-      }
-      next
-    }
-
-    mod <- catalog[[m_name]]
-    fit_metrics <- c("n", "r_squared", "aic", "bic")
-
-    # Separate term-level claims to infer term cohesively when untagged
-    term_claims <- Filter(function(c) !(c$metric %in% fit_metrics) && !(c$metric == "r" && !is.na(mod$fit$r)), grp$claims)
-    resolved_term <- grp$tag_term
-    if ((is.na(resolved_term) || !nzchar(resolved_term)) && length(term_claims) > 0L) {
-      resolved_term <- infer_group_term(grp$text, term_claims, mod$terms)
-    }
-
-    for (cl in grp$claims) {
-      if (cl$metric %in% fit_metrics) {
-        actual <- mod$fit[[cl$metric]]
-        res <- compare_claim_value(cl, actual, tol_extra, warn_rounding)
-        check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
-          line = cl$line, model = m_name, term = NA_character_,
-          metric = cl$metric, op = cl$op, reported_raw = cl$reported_raw,
-          reported = cl$reported, actual = actual, diff = res$diff,
-          tolerance = res$tol, issue_type = res$issue_type,
-          status = res$status, context = cl$context
-        )
-      } else if (cl$metric == "r" && !is.na(mod$fit$r)) {
-        actual <- mod$fit$r
-        res <- compare_claim_value(cl, actual, tol_extra, warn_rounding)
-        check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
-          line = cl$line, model = m_name, term = "correlation",
-          metric = "r", op = cl$op, reported_raw = cl$reported_raw,
-          reported = cl$reported, actual = actual, diff = res$diff,
-          tolerance = res$tol, issue_type = res$issue_type,
-          status = res$status, context = cl$context
-        )
-      } else {
-        trm <- if (!is.na(cl$term) && nzchar(cl$term)) cl$term else resolved_term
-        idx <- which(mod$terms$term == trm)
-        if (length(idx) == 0L) {
+      if (!(m_name %in% model_names)) {
+        for (cl in grp$claims) {
           check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
-            line = cl$line, model = m_name, term = trm %||% NA_character_,
+            line = cl$line, model = m_name, term = cl$term %||% NA_character_,
             metric = cl$metric, op = cl$op, reported_raw = cl$reported_raw,
             reported = cl$reported, actual = NA_real_, diff = NA_real_,
-            tolerance = NA_real_, issue_type = "missing_term",
+            tolerance = NA_real_, issue_type = "missing_model",
             status = "fail", context = cl$context
           )
-        } else {
-          col_nm <- if (cl$metric == "r") "estimate" else cl$metric
-          actual <- if (col_nm %in% names(mod$terms)) mod$terms[[col_nm]][idx[1L]] else NA_real_
+        }
+        next
+      }
+
+      mod <- catalog[[m_name]]
+      term_claims <- Filter(function(c) !(c$metric %in% fit_metrics) && !(c$metric == "r" && !is.na(mod$fit$r)), grp$claims)
+      resolved_term <- grp$tag_term
+      if ((is.na(resolved_term) || !nzchar(resolved_term)) && length(term_claims) > 0L) {
+        resolved_term <- infer_group_term(grp$text, term_claims, mod$terms)
+      }
+
+      for (cl in grp$claims) {
+        if (cl$metric %in% fit_metrics) {
+          actual <- mod$fit[[cl$metric]]
           res <- compare_claim_value(cl, actual, tol_extra, warn_rounding)
           check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
-            line = cl$line, model = m_name, term = trm,
+            line = cl$line, model = m_name, term = NA_character_,
             metric = cl$metric, op = cl$op, reported_raw = cl$reported_raw,
             reported = cl$reported, actual = actual, diff = res$diff,
             tolerance = res$tol, issue_type = res$issue_type,
             status = res$status, context = cl$context
           )
+        } else if (cl$metric == "r" && !is.na(mod$fit$r)) {
+          actual <- mod$fit$r
+          res <- compare_claim_value(cl, actual, tol_extra, warn_rounding)
+          check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
+            line = cl$line, model = m_name, term = "correlation",
+            metric = "r", op = cl$op, reported_raw = cl$reported_raw,
+            reported = cl$reported, actual = actual, diff = res$diff,
+            tolerance = res$tol, issue_type = res$issue_type,
+            status = res$status, context = cl$context
+          )
+        } else {
+          trm <- if (!is.na(cl$term) && nzchar(cl$term)) cl$term else resolved_term
+          idx <- which(mod$terms$term == trm)
+          if (length(idx) == 0L) {
+            check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
+              line = cl$line, model = m_name, term = trm %||% NA_character_,
+              metric = cl$metric, op = cl$op, reported_raw = cl$reported_raw,
+              reported = cl$reported, actual = NA_real_, diff = NA_real_,
+              tolerance = NA_real_, issue_type = "missing_term",
+              status = "fail", context = cl$context
+            )
+          } else {
+            col_nm <- if (cl$metric == "r") "estimate" else cl$metric
+            actual <- if (col_nm %in% names(mod$terms)) mod$terms[[col_nm]][idx[1L]] else NA_real_
+            res <- compare_claim_value(cl, actual, tol_extra, warn_rounding)
+            check_rows[[length(check_rows) + 1L]] <- tibble::tibble(
+              line = cl$line, model = m_name, term = trm,
+              metric = cl$metric, op = cl$op, reported_raw = cl$reported_raw,
+              reported = cl$reported, actual = actual, diff = res$diff,
+              tolerance = res$tol, issue_type = res$issue_type,
+              status = res$status, context = cl$context
+            )
+          }
         }
       }
     }
@@ -766,12 +1207,16 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
   n_pass <- sum(checks$status == "pass")
   n_warn <- sum(checks$status == "warn")
   n_fail <- sum(checks$status == "fail")
-  overall <- combine_status(checks$status)
+  n_ic_fail <- sum(internal_checks$status == "fail")
+  n_ic_warn <- sum(internal_checks$status == "warn")
+  overall <- combine_status(c(checks$status, internal_checks$status))
 
   structure(
     list(
       checks = checks,
+      internal_checks = internal_checks,
       manuscript = source_label,
+      format = format,
       models_checked = model_names,
       summary = list(
         n_claims = nrow(checks),
@@ -779,7 +1224,10 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
         n_warn = as.integer(n_warn),
         n_fail = as.integer(n_fail),
         n_sign_flips = as.integer(sum(checks$issue_type == "sign_flip")),
-        n_rounding = as.integer(sum(checks$issue_type == "rounding_discrepancy"))
+        n_rounding = as.integer(sum(checks$issue_type == "rounding_discrepancy")),
+        n_internal_checks = nrow(internal_checks),
+        n_internal_warn = as.integer(n_ic_warn),
+        n_internal_fail = as.integer(n_ic_fail)
       ),
       status = overall
     ),
@@ -793,13 +1241,11 @@ infer_group_term <- function(text, term_claims, terms_tbl) {
   cand <- if (nrow(non_int) > 0L) non_int else terms_tbl
   if (nrow(cand) == 1L) return(cand$term[1L])
 
-  # 1. Exact term name mentioned in prose
   hits <- cand$term[vapply(cand$term, function(tm) {
     grepl(paste0("(?<![A-Za-z0-9_])", gsub("([.^$|()*+?{}\\[\\]\\\\])", "\\\\\\1", tm), "(?![A-Za-z0-9_])"), text, perl = TRUE)
   }, logical(1L))]
   if (length(hits) == 1L) return(hits[1L])
 
-  # 2. Score candidate terms cohesively (using abs() for estimate so sign flips bind to true term!)
   scores <- vapply(seq_len(nrow(cand)), function(r) {
     sc <- 0
     for (cl in term_claims) {
@@ -837,7 +1283,6 @@ compare_claim_value <- function(cl, actual, tol_extra, warn_rounding) {
     return(list(diff = NA_real_, tol = NA_real_, issue_type = "unavailable_metric", status = "warn"))
   }
 
-  # Exact sample size comparison
   if (cl$metric == "n") {
     d <- cl$reported - actual
     if (abs(d) <= 1e-9) {
@@ -846,7 +1291,6 @@ compare_claim_value <- function(cl, actual, tol_extra, warn_rounding) {
     return(list(diff = d, tol = 0, issue_type = "stale_sample_size", status = "fail"))
   }
 
-  # Inequality p-value checks (p < .001, p > .05, etc.)
   if (cl$metric == "p_value" && cl$op != "=") {
     ok <- eval_ineq(actual, cl$op, cl$reported)
     return(list(
@@ -857,7 +1301,6 @@ compare_claim_value <- function(cl, actual, tol_extra, warn_rounding) {
     ))
   }
 
-  # Standard numeric comparison with rounding half-unit & IEEE-754 boundary tolerance
   u <- cl$unit %||% 1
   eps <- 1e-11 * max(1, abs(actual))
   half_unit <- 0.5 * u + tol_extra
@@ -865,7 +1308,6 @@ compare_claim_value <- function(cl, actual, tol_extra, warn_rounding) {
   diff_val <- cl$reported - actual
   abs_diff <- abs(diff_val)
 
-  # Explicit sign-flip check (for signed quantities; -0.00 has reported == 0 so never false-flips)
   if (cl$metric %in% c("estimate", "statistic", "r", "ci_lower", "ci_upper")) {
     if (cl$reported != 0 && sign(cl$reported) != sign(actual) && abs(actual) > half_unit + eps) {
       return(list(diff = diff_val, tol = half_unit, issue_type = "sign_flip", status = "fail"))
@@ -892,9 +1334,14 @@ as_tibble.statci_manuscript_audit <- function(x, ...) {
 print.statci_manuscript_audit <- function(x, max_rows = 20L, ...) {
   badge <- format_status_badge(x$status)
   s <- x$summary
+  ic_msg <- if (s$n_internal_checks > 0L) {
+    paste0(" | internal: ", s$n_internal_checks, " (", s$n_internal_fail, " fail)")
+  } else {
+    ""
+  }
   cli::cli_text(
     "{badge} {.strong statci Manuscript Audit} ({basename(x$manuscript)}): ",
-    "{s$n_claims} claim(s) | {s$n_pass} pass, {s$n_warn} warn, {s$n_fail} fail"
+    "{s$n_claims} claim(s) | {s$n_pass} pass, {s$n_warn} warn, {s$n_fail} fail{ic_msg}"
   )
   issues <- x$checks[x$checks$status != "pass", , drop = FALSE]
   if (nrow(issues) > 0L) {
@@ -907,6 +1354,15 @@ print.statci_manuscript_audit <- function(x, max_rows = 20L, ...) {
         "  {b} line {r$line} ({r$model} {trm}{r$metric}): ",
         "reported `{r$op} {r$reported_raw}` vs actual `{fmt_num(r$actual, 4L)}` ({r$issue_type})"
       )
+    }
+  }
+  ic_bad <- x$internal_checks[x$internal_checks$status != "pass", , drop = FALSE]
+  if (nrow(ic_bad) > 0L) {
+    show_ic <- min(nrow(ic_bad), as.integer(max_rows))
+    for (i in seq_len(show_ic)) {
+      r <- ic_bad[i, ]
+      b <- format_status_badge(r$status)
+      cli::cli_text("  {b} line {r$line} ({r$check_type}): {r$detail}")
     }
   }
   invisible(x)

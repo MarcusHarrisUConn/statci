@@ -4,13 +4,33 @@
 \name{statci-package}
 \alias{statci}
 \alias{statci-package}
-\title{statci: Automated Statistical CI/CD, Calibration Fuzzing, and Manuscript Auditing}
+\title{statci: Statistical CI/CD, Calibration Fuzzing, and Manuscript Auditing}
 \description{
-Provides automated continuous integration and verification tools for statistical R pipelines and manuscripts. Includes an abstract syntax tree (AST) statistical linter for R scripts and 'Quarto'/'RMarkdown' documents, an estimator calibration and simulation-based calibration (SBC) fuzzing harness with Monte Carlo error bounds, parallel RNG invariance testing, a manuscript-to-model numerical consistency auditor, an adversarial sensitivity battery, standalone HTML and Markdown audit reports, and a 'GitHub Actions' workflow generator.
+Automated continuous integration and verification tools for statistical R
+pipelines, methods packages, and Quarto/RMarkdown/LaTeX manuscripts.
 }
+\section{Verification Pillars}{
+
+\itemize{
+\item \strong{AST Statistical Linter}: \code{\link[=stat_lint]{stat_lint()}}, \code{\link[=stat_lint_text]{stat_lint_text()}},
+\code{\link[=stat_lint_dir]{stat_lint_dir()}}, \code{\link[=list_stat_rules]{list_stat_rules()}}, \code{\link[=new_stat_rule]{new_stat_rule()}},
+\code{\link[=register_stat_rule]{register_stat_rule()}}, \code{\link[=export_statci_sarif]{export_statci_sarif()}}.
+\item \strong{Estimator Calibration, SBC, Power & Parallel RNG}: \code{\link[=audit_estimator]{audit_estimator()}},
+\code{\link[=audit_sbc]{audit_sbc()}}, \code{\link[=audit_power_curve]{audit_power_curve()}}, \code{\link[=check_parallel_rng]{check_parallel_rng()}},
+\code{\link[=statci_parallel_apply]{statci_parallel_apply()}}.
+\item \strong{Manuscript-to-Code Consistency Auditor}: \code{\link[=audit_manuscript]{audit_manuscript()}},
+\code{\link[=audit_manuscript_text]{audit_manuscript_text()}}.
+\item \strong{Adversarial Sensitivity Battery}: \code{\link[=audit_sensitivity]{audit_sensitivity()}}.
+\item \strong{Orchestration, Reports & GitHub Actions}: \code{\link[=read_statci_config]{read_statci_config()}},
+\code{\link[=statci_audit_project]{statci_audit_project()}}, \code{\link[=statci_report]{statci_report()}}, \code{\link[=render_statci_report]{render_statci_report()}},
+\code{\link[=statci_check_gate]{statci_check_gate()}}, \code{\link[=use_statci_github_action]{use_statci_github_action()}}.
+}
+}
+
 \seealso{
 Useful links:
 \itemize{
+  \item \url{https://marcusharrisphd.com/statci/}
   \item \url{https://github.com/MarcusHarrisUConn/statci}
   \item Report bugs at \url{https://github.com/MarcusHarrisUConn/statci/issues}
 }

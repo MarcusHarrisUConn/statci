@@ -4,6 +4,7 @@
 ^PROJECT_STATEMENT\.md$
 ^ARCHITECTURE\.md$
 ^SECURITY\.md$
+^cran-comments\.md$
 ^README\.Rmd$
 ^LICENSE\.md$
 ^_pkgdown\.yml$

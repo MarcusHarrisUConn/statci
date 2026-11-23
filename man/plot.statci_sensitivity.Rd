@@ -20,3 +20,13 @@ R dotchart and returns \code{x} invisibly.
 \description{
 Plot adversarial sensitivity shifts across scenarios
 }
+\examples{
+sens <- audit_sensitivity(
+  data = mtcars,
+  fit_fn = function(d) lm(mpg ~ wt, data = d),
+  n_boot = 20L,
+  max_loo_units = 15L,
+  seed = 42L
+)
+plot(sens)
+}

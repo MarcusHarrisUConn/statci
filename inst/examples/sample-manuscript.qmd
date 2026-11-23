@@ -1,0 +1,15 @@
+---
+title: "Example Study Manuscript"
+format: html
+---
+
+## Results
+
+<!-- statci: model=primary term=wt -->
+Vehicle weight strongly reduced fuel economy (*b* = -5.34, SE = 0.56, *t*(30) = -9.56, 95% CI [-6.49, -4.20], *p* < .001).
+Overall model fit across *N* = 32 vehicles was high ($R^2 = 0.75$, *F*(1, 30) = 91.38).
+
+<!-- statci: model=primary -->
+| Term | b | SE | t | 95% CI | p |
+|---|---|---|---|---|---|
+| wt | -5.34 | 0.56 | -9.56 | [-6.49, -4.20] | < .001 |

@@ -157,7 +157,24 @@ as_tibble(sens_fragile)[, c("category", "scenario", "baseline", "perturbed", "si
 
 Notice how both tail winsorization and leave-one-out influence immediately identify observation `1` as the single driver of the sign reversal and fail the robustness gate.
 
-## 5. Unified Report Assembly
+## 5. Power-Curve Auditing (`audit_power_curve()`)
+
+`audit_power_curve()` audits empirical rejection probabilities across an effect-size grid with exact Clopper-Pearson 95% confidence bounds, Type-I error verification at `effect = 0`, MCSE-adjusted monotonicity testing, target-power verification, and linear-interpolated minimum detectable effect (`mde`):
+
+```{r power-curve-demo}
+pc_audit <- audit_power_curve(
+  dgp = function(d) rnorm(40, mean = d, sd = 1),
+  test_fn = function(y) t.test(y, mu = 0),
+  effect_grid = c(0, 0.25, 0.50, 0.75),
+  n_sim = 80L,
+  target_effect = 0.50,
+  target_power = 0.80,
+  seed = 42L
+)
+pc_audit
+```
+
+## 6. Unified Report Assembly
 
 All verification pillars compose cleanly into a single `statci_report()` ready for standalone HTML or Markdown output in CI:
 
@@ -167,6 +184,7 @@ final_rep <- statci_report(
   sbc = sbc_ok,
   parallel_rng = par_audit,
   sensitivity = sens_fragile,
+  power_curve = pc_audit,
   title = "Calibration & Robustness Verification"
 )
 final_rep

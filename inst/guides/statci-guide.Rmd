@@ -1,0 +1,149 @@
+---
+title: "statci: Statistical CI/CD & Verification Field Guide"
+author: "Marcus Harris"
+date: "Version 0.3.0 (2026)"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: pdflatex
+fontsize: 11pt
+geometry: margin=1in
+colorlinks: true
+linkcolor: NavyBlue
+urlcolor: NavyBlue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = "#>"
+)
+library(statci)
+```
+
+# Overview
+
+Quantitative research pipelines and statistical R packages frequently ship silent methodological defects that conventional unit tests and style linters cannot detect: unseeded stochastic calls, duplicate worker seeds in parallel loops, train/test data leakage, uncentered multilevel interactions, silent listwise sample mismatches, biased custom estimators, and stale numbers copied into manuscripts.
+
+**`statci`** brings software-engineering-grade continuous integration and probabilistic verification to R scripts, Quarto/RMarkdown/LaTeX manuscripts, and custom statistical estimators across five integrated verification pillars:
+
+1. **AST-Based Statistical Linter** (`stat_lint()`, `stat_lint_dir()`, 17 built-in rules + custom registry + SARIF 2.1.0 export).
+2. **Estimator Calibration, SBC, Power-Curve & Parallel RNG Harness** (`audit_estimator()`, `audit_sbc()`, `audit_power_curve()`, `check_parallel_rng()`).
+3. **Manuscript-to-Code Consistency Auditor** (`audit_manuscript()` for `.qmd`, `.Rmd`, and `.tex` prose, tables, and internal APA arithmetic).
+4. **Adversarial Sensitivity & Robustness Battery** (`audit_sensitivity()` covering winsorization, LOCO/LOO influence, missingness contrasts, and cluster/row bootstrap).
+5. **Project Orchestration, HTML/Markdown Reports & GitHub Actions CI** (`read_statci_config()`, `statci_audit_project()`, `statci_report()`, `render_statci_report()`, `use_statci_github_action()`).
+
+# Pillar 1: AST-Based Statistical Linter
+
+`statci` parses R code and Quarto/RMarkdown chunks into full XML abstract syntax trees via `parse(keep.source = TRUE)`, `xmlparsedata`, and `xml2`. For `.qmd` and `.Rmd` files, blank-line-preserving document projection maintains exact 1-based original line numbers and cross-chunk scope awareness.
+
+## Built-in Methodological Rule Catalog (17 Rules)
+
+```{r rules-table, echo=FALSE}
+rt <- list_stat_rules()[, c("id", "severity", "category", "title")]
+knitr::kable(rt, booktabs = FALSE, caption = "Built-in statci AST statistical lint rules.")
+```
+
+## Comparing a Flawed vs. Clean Analysis Script
+
+```{r lint-example}
+flawed <- system.file("examples", "flawed-analysis.R", package = "statci")
+clean <- system.file("examples", "clean-analysis.R", package = "statci")
+
+res_flawed <- stat_lint(flawed)
+res_clean <- stat_lint(clean)
+
+cat("Flawed script findings:", res_flawed$summary$n_findings,
+    "| status:", toupper(res_flawed$status), "\n")
+cat("Clean script findings: ", res_clean$summary$n_findings,
+    "| status:", toupper(res_clean$status), "\n")
+```
+
+Inline exceptions use AST `<COMMENT>`-verified directives (`# statci-ignore: <rule_id>` or `# statci-ignore-next-line`), ensuring string literals can never spoof suppressions.
+
+# Pillar 2: Calibration, SBC, Power Curves & Parallel RNG
+
+## Estimator Recovery & Clopper-Pearson Coverage (`audit_estimator()`)
+
+`audit_estimator()` accounts explicitly for Monte Carlo standard error (MCSE):
+
+- **Bias**: standardized $z_{\text{bias}} = |\bar{\hat\theta} - \theta| / (s_{\hat\theta}/\sqrt{M})$.
+- **Coverage**: exact two-sided Clopper-Pearson binomial test (`stats::binom.test(k, M, p = 1 - alpha)`).
+- **Model vs. Empirical SE Ratio**: MCSE-adjusted interval check on $R = \overline{\text{SE}} / s_{\hat\theta}$.
+- **Type-I Error**: exact binomial calibration test under `null_dgp` or null parameters ($\theta_j = 0$).
+- **Convergence & Singularity**: programmatic tracking of errors, non-convergence, and `lme4::isSingular()`.
+
+```{r est-example}
+est_ok <- audit_estimator(
+  dgp = function() {
+    x <- rnorm(100)
+    z <- rnorm(100)
+    data.frame(x = x, z = z, y = 1 + 0.8 * x + rnorm(100))
+  },
+  estimator = function(df) lm(y ~ x + z, data = df),
+  true_params = c(x = 0.8, z = 0.0),
+  n_sim = 100L,
+  seed = 2026L
+)
+est_ok$recovery[, c("parameter", "bias", "rmse", "se_ratio", "coverage", "status")]
+```
+
+## Simulation-Based Calibration (`audit_sbc()`)
+
+Following Talts et al. (2018), `audit_sbc()` draws $\tilde\theta \sim p(\theta)$, simulates $\tilde y \sim p(y \mid \tilde\theta)$, computes rank statistics across $L$ posterior draws with randomized tie-breaking, and tests uniformity via Pearson's $\chi^2$ and Kolmogorov-Smirnov tests alongside 50% and 90% posterior interval coverage.
+
+## Power-Curve Auditing (`audit_power_curve()`)
+
+```{r power-example}
+pc <- audit_power_curve(
+  dgp = function(d) rnorm(40, mean = d, sd = 1),
+  test_fn = function(y) t.test(y, mu = 0),
+  effect_grid = c(0, 0.25, 0.50, 0.75),
+  n_sim = 80L,
+  target_effect = 0.50,
+  target_power = 0.80,
+  seed = 42L
+)
+pc$curve[, c("effect", "power", "ci_low", "ci_high", "mcse")]
+```
+
+## Core-Count-Invariant Parallel RNG (`statci_parallel_apply()`, `check_parallel_rng()`)
+
+`statci_parallel_apply()` pre-generates deterministic per-task seeds from a master `"L'Ecuyer-CMRG"` stream so outputs are bit-for-bit identical across `cores = 1` and `cores = 2+` on macOS, Linux, and Windows. `check_parallel_rng()` catches non-invariant worker-stream parallel code automatically.
+
+# Pillar 3: Manuscript-to-Code Consistency Auditing
+
+`audit_manuscript()` verifies inline prose statistics, Markdown/Quarto tables, and LaTeX `.tex` `tabular` tables against fitted R model objects (`lm`, `glm`, `lmerMod`, `htest`, or tidy tables):
+
+- Distinguishes exact rounding matches (`pass`), off-by-one-ulp rounding discrepancies (`warn`), hard value mismatches (`fail`), sign flips (`fail`), stale sample sizes (`fail`), and violated p-value inequalities (`fail`).
+- Handles Unicode minus (`-`), en-dash CI separators, leading-dot decimals (`.003`, `-.42`), scientific notation (`1.2e-4`), APA `F(df1, df2)` and `chi2(df)`, and IEEE-754 half-to-even rounding boundaries.
+- Runs interval-arithmetic internal consistency verification (`t` vs. `b / SE` and `95% CI` midpoint/width vs. `b` and `SE`) even without saved model files.
+
+```{r ms-example}
+fit <- lm(mpg ~ wt, data = mtcars)
+qmd_ex <- system.file("examples", "sample-manuscript.qmd", package = "statci")
+ms_res <- audit_manuscript(qmd_ex, models = list(primary = fit))
+ms_res$summary
+```
+
+# Pillar 4: Adversarial Sensitivity & Robustness Battery
+
+`audit_sensitivity()` perturbs any fitted pipeline across:
+
+1. **Outlier Winsorization** of continuous non-binary columns at tail quantiles.
+2. **Leave-One-Cluster-Out (LOCO) / Leave-One-Out (LOO)** jackknife influence.
+3. **Missingness & Imputation Stress Tests** (observed + MCAR complete-case vs. predictor median/mean imputation).
+4. **Nonparametric Bootstrap Stability** (cluster or row resampling, sign consistency, percentile CIs).
+
+# Pillar 5: Project Configuration, SARIF & CI/CD
+
+Define `.statci.yml` at the repository root and run `statci_audit_project()` locally or inside GitHub Actions generated by `use_statci_github_action(..., upload_sarif = TRUE)`:
+
+- Strict `eval.expr = FALSE` YAML loading and schema validation (`read_statci_config()`).
+- Standalone offline HTML5 dashboards with Content-Security-Policy headers (`render_statci_report()`).
+- SARIF 2.1.0 export (`export_statci_sarif()`) for native GitHub Code Scanning inline pull-request annotations.
+- Strict input allowlisting and workflow `env:` variable indirection preventing YAML, shell, or R code injection.

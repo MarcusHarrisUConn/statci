@@ -220,11 +220,14 @@ default_rule_ids <- function() {
     "unsafe_parallel_rng",
     "duplicate_parallel_seed",
     "preprocessing_before_split",
+    "in_sample_prediction_eval",
     "uncentered_mlm_interaction",
     "silent_listwise_mismatch",
     "silent_factor_drop",
+    "silent_na_coercion",
     "equality_on_float",
     "unadjusted_multiple_testing",
+    "stepwise_selection_unvalidated",
     "missing_convergence_check",
     "global_seed_override_in_fn",
     "short_logical_literal",
@@ -1223,6 +1226,275 @@ check_absolute_path_in_script <- function(ctx) {
   findings
 }
 
+# 15. silent_na_coercion
+check_silent_na_coercion <- function(ctx) {
+  num_coercions <- c("as.numeric", "as.integer", "as.double")
+  str_producers <- c(
+    "character", "readLines", "strsplit", "gsub", "sub", "trimws",
+    "paste", "paste0", "str_extract", "str_replace", "str_trim",
+    "str_remove", "str_split", "substr", "substring"
+  )
+  factor_creators <- c(
+    "factor", "as.factor", "ordered", "as.ordered", "cut",
+    "fct_relevel", "fct_lump", "fct_recode"
+  )
+  na_check_fns <- c("is.na", "anyNA", "complete.cases", "na.omit", "na.fail")
+
+  factor_vars <- character(0)
+  char_vars <- character(0)
+  na_checked_vars <- character(0)
+  has_any_na_check <- FALSE
+
+  for (u in ctx$units) {
+    all_calls <- ast_fn_calls_in(u$xml)
+    if (any(all_calls %in% na_check_fns)) has_any_na_check <- TRUE
+
+    assigns <- ast_assignments(u$xml, u$line_offset)
+    for (a in assigns) {
+      var_short <- sub("^.*\\$", "", a$lhs)
+      if (any(a$rhs_calls %in% factor_creators)) {
+        factor_vars <- unique(c(factor_vars, a$lhs, var_short))
+      } else {
+        has_str_lit <- !inherits(xml2::xml_find_first(a$rhs_node, ".//STR_CONST"), "xml_missing") &&
+          !any(a$rhs_calls %in% c("lm", "glm", "lmer", "read.csv", "readRDS", "file.path", "factor", "as.factor", "ordered"))
+        is_str_call <- any(a$rhs_calls %in% str_producers) ||
+          ("as.character" %in% a$rhs_calls && length(intersect(a$rhs_symbols, factor_vars)) == 0L)
+        if (is_str_call || (has_str_lit && (length(a$rhs_calls) == 0L || all(a$rhs_calls == "c")))) {
+          char_vars <- unique(c(char_vars, a$lhs, var_short))
+        }
+      }
+    }
+
+    for (nc in ast_calls(u$xml, na_check_fns)) {
+      na_checked_vars <- unique(c(na_checked_vars, ast_symbols(nc)))
+    }
+  }
+
+  findings <- list()
+  for (u in ctx$units) {
+    for (nd in ast_calls(u$xml, num_coercions)) {
+      if (ast_is_inside_call(nd, "suppressWarnings")) next
+      args <- ast_call_args(nd)
+      if (length(args) < 1L || is.null(args[[1L]]$expr)) next
+      arg_expr <- args[[1L]]$expr
+      arg_calls <- ast_fn_calls_in(arg_expr)
+      arg_syms <- ast_symbols(arg_expr)
+      arg_txt <- xml2::xml_text(arg_expr)
+
+      # Exempt as.numeric(as.character(factor_var)) — recommended fix for silent_factor_drop
+      if ("as.character" %in% arg_calls &&
+          (length(intersect(arg_syms, factor_vars)) > 0L || any(arg_calls %in% factor_creators))) {
+        next
+      }
+
+      is_char_lit <- !inherits(xml2::xml_find_first(arg_expr, ".//STR_CONST"), "xml_missing") &&
+        (length(arg_calls) == 0L || all(arg_calls %in% c("c", str_producers)))
+      is_str_prod <- any(arg_calls %in% str_producers)
+      is_char_var <- (arg_txt %in% char_vars) || (length(arg_syms) >= 1L && tail_chr(arg_syms) %in% char_vars)
+
+      if (!(is_char_lit || is_str_prod || is_char_var)) next
+
+      assigned <- ast_assigned_var(nd)
+      assigned_short <- if (!is.na(assigned)) sub("^.*\\$", "", assigned) else NA_character_
+      is_checked <- if (!is.na(assigned)) {
+        assigned %in% na_checked_vars || assigned_short %in% na_checked_vars
+      } else {
+        has_any_na_check
+      }
+      if (is_checked) next
+
+      fn <- ast_call_name(nd)
+      ln <- ast_line(nd, u$line_offset)
+      findings[[length(findings) + 1L]] <- make_finding(
+        ctx, ln, ast_col(nd),
+        paste0(
+          "`", fn, "()` coerces character/parsed string input without checking `anyNA()` or `is.na()`; ",
+          "unparseable tokens silently turn into `NA`."
+        )
+      )
+    }
+  }
+  findings
+}
+
+# 16. stepwise_selection_unvalidated
+check_stepwise_selection_unvalidated <- function(ctx) {
+  step_fns <- c(
+    "step", "stepAIC", "regsubsets",
+    "ols_step_both_p", "ols_step_forward_p", "ols_step_backward_p",
+    "ols_step_both_aic", "ols_step_forward_aic", "ols_step_backward_aic"
+  )
+  val_fns <- c(
+    "initial_split", "group_initial_split", "vfold_cv", "createDataPartition",
+    "createFolds", "trainControl", "cv.glmnet", "boot", "bootstraps",
+    "validate", "calibrate"
+  )
+
+  has_validation <- FALSE
+  for (u in ctx$units) {
+    calls <- ast_fn_calls_in(u$xml)
+    if (any(calls %in% val_fns)) {
+      has_validation <- TRUE
+      break
+    }
+    # Base R train/test split via sample()/sample.int() with nrow() or train/test var
+    for (sc in ast_calls(u$xml, c("sample", "sample.int"))) {
+      assigned <- ast_assigned_var(sc)
+      if ("nrow" %in% ast_fn_calls_in(sc) ||
+          (!is.na(assigned) && grepl("train|test|split|fold|holdout|idx", assigned, ignore.case = TRUE))) {
+        has_validation <- TRUE
+        break
+      }
+    }
+    if (has_validation) break
+  }
+
+  if (has_validation) return(list())
+
+  findings <- list()
+  for (u in ctx$units) {
+    for (nd in ast_calls(u$xml, step_fns)) {
+      fn <- ast_call_name(nd)
+      # Skip if operating on explicitly named training data
+      syms <- ast_symbols(nd)
+      if (any(grepl("train|trn|fold|split", syms, ignore.case = TRUE))) next
+      ln <- ast_line(nd, u$line_offset)
+      findings[[length(findings) + 1L]] <- make_finding(
+        ctx, ln, ast_col(nd),
+        paste0(
+          "In-sample stepwise variable selection (`", fn, "()`) without cross-validation or ",
+          "holdout split biases estimates and invalidates post-selection p-values; ",
+          "validate on held-out data or use penalized regression (e.g., `cv.glmnet()`)."
+        )
+      )
+    }
+  }
+  findings
+}
+
+# 17. in_sample_prediction_eval
+check_in_sample_prediction_eval <- function(ctx) {
+  fit_fns <- c("lm", "glm", "lmer", "glmer", "randomForest", "ranger", "rpart", "xgb.train", "glmnet", "gam")
+  metric_fns <- c(
+    "rmse", "mae", "mse", "mape", "rmsle", "auc", "roc", "roc_auc",
+    "confusionMatrix", "accuracy", "logLoss", "brier", "metrics"
+  )
+
+  model_data <- list()
+  in_sample_preds <- list()
+
+  for (u in ctx$units) {
+    assigns <- ast_assignments(u$xml, u$line_offset)
+    for (a in assigns) {
+      # Track model -> training data symbol
+      mc <- ast_calls(a$rhs_node, fit_fns)
+      if (length(mc) >= 1L) {
+        margs <- ast_call_args(mc[[1L]])
+        d_arg <- Filter(function(x) identical(x$name, "data"), margs)
+        d_node <- if (length(d_arg) > 0L) d_arg[[1L]]$expr else if (length(margs) >= 2L && is.na(margs[[2L]]$name)) margs[[2L]]$expr else NULL
+        d_syms <- if (!is.null(d_node)) ast_symbols(d_node) else character(0)
+        if (length(d_syms) >= 1L) {
+          model_data[[a$lhs_root]] <- d_syms[1L]
+        }
+      }
+
+      # Track predictions computed on same training data
+      pc <- ast_calls(a$rhs_node, c("predict", "fitted"))
+      if (length(pc) >= 1L) {
+        pnode <- pc[[1L]]
+        pfn <- ast_call_name(pnode)
+        pargs <- ast_call_args(pnode)
+        if (length(pargs) >= 1L && !is.null(pargs[[1L]]$expr)) {
+          mod_syms <- ast_symbols(pargs[[1L]]$expr)
+          mod_nm <- if (length(mod_syms) == 1L) mod_syms[1L] else NA_character_
+          train_df <- if (!is.na(mod_nm) && mod_nm %in% names(model_data)) model_data[[mod_nm]] else NA_character_
+          if (!is.na(train_df)) {
+            nd_arg <- Filter(function(x) identical(x$name, "newdata"), pargs)
+            if (pfn == "fitted" || length(nd_arg) == 0L) {
+              in_sample_preds[[a$lhs_root]] <- list(model = mod_nm, data = train_df, line = a$line)
+            } else if (!is.null(nd_arg[[1L]]$expr)) {
+              nd_syms <- ast_symbols(nd_arg[[1L]]$expr)
+              if (length(nd_syms) == 1L && identical(nd_syms[1L], train_df)) {
+                in_sample_preds[[a$lhs_root]] <- list(model = mod_nm, data = train_df, line = a$line)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  is_inline_in_sample_predict <- function(node) {
+    pcs <- ast_calls(node, c("predict", "fitted"))
+    for (pnode in pcs) {
+      pfn <- ast_call_name(pnode)
+      pargs <- ast_call_args(pnode)
+      if (length(pargs) < 1L || is.null(pargs[[1L]]$expr)) next
+      mod_syms <- ast_symbols(pargs[[1L]]$expr)
+      if (length(mod_syms) != 1L || !(mod_syms[1L] %in% names(model_data))) next
+      train_df <- model_data[[mod_syms[1L]]]
+      nd_arg <- Filter(function(x) identical(x$name, "newdata"), pargs)
+      if (pfn == "fitted" || length(nd_arg) == 0L) return(train_df)
+      if (!is.null(nd_arg[[1L]]$expr)) {
+        nd_syms <- ast_symbols(nd_arg[[1L]]$expr)
+        if (length(nd_syms) == 1L && identical(nd_syms[1L], train_df)) return(train_df)
+      }
+    }
+    NA_character_
+  }
+
+  findings <- list()
+  flagged_lines <- integer(0)
+
+  for (u in ctx$units) {
+    # 1. Explicit metric calls like rmse(df$y, pred) or auc(df$y, predict(fit, newdata = df))
+    for (mc in ast_calls(u$xml, metric_fns)) {
+      ln <- ast_line(mc, u$line_offset)
+      if (ln %in% flagged_lines) next
+      syms <- ast_symbols(mc)
+      hit_pred <- intersect(syms, names(in_sample_preds))
+      inline_df <- is_inline_in_sample_predict(mc)
+      if (length(hit_pred) > 0L || !is.na(inline_df)) {
+        df_nm <- if (length(hit_pred) > 0L) in_sample_preds[[hit_pred[1L]]]$data else inline_df
+        flagged_lines <- c(flagged_lines, ln)
+        findings[[length(findings) + 1L]] <- make_finding(
+          ctx, ln, ast_col(mc),
+          paste0(
+            "In-sample predictive evaluation in `", ast_call_name(mc), "()` using predictions ",
+            "from training dataset `", df_nm, "`; evaluate predictive metrics on an independent test or CV split."
+          )
+        )
+      }
+    }
+
+    # 2. Manual MSE / MAE expressions: mean((y - pred)^2) or mean(abs(y - pred))
+    for (mn in ast_calls(u$xml, "mean")) {
+      ln <- ast_line(mn, u$line_offset)
+      if (ln %in% flagged_lines) next
+      has_minus <- !inherits(xml2::xml_find_first(mn, ".//OP-MINUS"), "xml_missing")
+      has_sq_or_abs <- !inherits(xml2::xml_find_first(mn, ".//OP-CARET"), "xml_missing") ||
+        "abs" %in% ast_fn_calls_in(mn)
+      if (!has_minus || !has_sq_or_abs) next
+      syms <- ast_symbols(mn)
+      hit_pred <- intersect(syms, names(in_sample_preds))
+      inline_df <- is_inline_in_sample_predict(mn)
+      if (length(hit_pred) > 0L || !is.na(inline_df)) {
+        df_nm <- if (length(hit_pred) > 0L) in_sample_preds[[hit_pred[1L]]]$data else inline_df
+        flagged_lines <- c(flagged_lines, ln)
+        findings[[length(findings) + 1L]] <- make_finding(
+          ctx, ln, ast_col(mn),
+          paste0(
+            "In-sample prediction error (`mean(...)`) computed on training dataset `", df_nm,
+            "`; evaluate out-of-sample error on a held-out test or cross-validation set."
+          )
+        )
+      }
+    }
+  }
+
+  findings
+}
+
 build_default_rules <- function() {
   list(
     new_stat_rule(
@@ -1262,6 +1534,15 @@ build_default_rules <- function() {
       check = check_preprocessing_before_split
     ),
     new_stat_rule(
+      id = "in_sample_prediction_eval",
+      title = "Predictive error evaluated in-sample on training data",
+      severity = "warning",
+      category = "data_leakage",
+      description = "Evaluating RMSE, MAE, AUC, or MSE on predictions from the same training dataset yields optimistic generalization estimates.",
+      recommendation = "Evaluate predictive metrics on a held-out test set or out-of-fold cross-validation predictions.",
+      check = check_in_sample_prediction_eval
+    ),
+    new_stat_rule(
       id = "uncentered_mlm_interaction",
       title = "Uncentered predictor in multilevel interaction",
       severity = "warning",
@@ -1289,6 +1570,15 @@ build_default_rules <- function() {
       check = check_silent_factor_drop
     ),
     new_stat_rule(
+      id = "silent_na_coercion",
+      title = "Unchecked numeric coercion of character/parsed strings",
+      severity = "warning",
+      category = "modeling",
+      description = "Coercing character vectors or string-parsed tokens with as.numeric()/as.integer() silently produces NAs for unparseable values.",
+      recommendation = "Verify coerced outputs with anyNA() or is.na() before downstream modeling.",
+      check = check_silent_na_coercion
+    ),
+    new_stat_rule(
       id = "equality_on_float",
       title = "Exact equality comparison on floating-point expression",
       severity = "warning",
@@ -1305,6 +1595,15 @@ build_default_rules <- function() {
       description = "Running repeated hypothesis tests across outcomes or subgroups without multiplicity adjustment inflates Type-I error.",
       recommendation = "Collect raw p-values and adjust them with p.adjust(pvals, method = \"BH\") or \"holm\".",
       check = check_unadjusted_multiple_testing
+    ),
+    new_stat_rule(
+      id = "stepwise_selection_unvalidated",
+      title = "Unvalidated in-sample stepwise variable selection",
+      severity = "warning",
+      category = "inference",
+      description = "Automated stepwise selection (step(), stepAIC(), regsubsets()) without holdout or cross-validation biases coefficients and invalidates p-values.",
+      recommendation = "Validate stepwise models on an independent test/CV split or use penalized regression (e.g., cv.glmnet()).",
+      check = check_stepwise_selection_unvalidated
     ),
     new_stat_rule(
       id = "missing_convergence_check",

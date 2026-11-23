@@ -1,0 +1,18 @@
+version: 1
+lint:
+  paths:
+    - R
+  exclude_rules:
+    - cor_without_use_arg
+  skip_eval_false: false
+  severity_overrides:
+    short_logical_literal: error
+gate:
+  fail_on: fail
+report:
+  title: "Project Statistical CI/CD Audit"
+  output_dir: "statci-reports"
+  formats:
+    - html
+    - markdown
+    - sarif

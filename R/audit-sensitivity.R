@@ -536,6 +536,16 @@ print.statci_sensitivity <- function(x, ...) {
 #' @return A `ggplot` object if `ggplot2` is installed, otherwise draws a base
 #'   R dotchart and returns `x` invisibly.
 #' @export
+#'
+#' @examples
+#' sens <- audit_sensitivity(
+#'   data = mtcars,
+#'   fit_fn = function(d) lm(mpg ~ wt, data = d),
+#'   n_boot = 20L,
+#'   max_loo_units = 15L,
+#'   seed = 42L
+#' )
+#' plot(sens)
 plot.statci_sensitivity <- function(x, parameter = NULL, ...) {
   df <- x$results
   if (!is.null(parameter)) {

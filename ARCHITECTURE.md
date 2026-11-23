@@ -14,16 +14,19 @@ statci/
 │   ├── statci-package.R       # Package-level docs and shared imports
 │   ├── security.R             # Centralized HTML/MD escaping, path/symlink & GHA validators
 │   ├── utils.R                # Shared helpers, status algebra, formatting, RNG utils
+│   ├── config.R               # .statci.yml strict YAML config & statci_audit_project()
 │   ├── lint-parser.R          # .R / .qmd / .Rmd projection, XML AST construction, AST suppression parser
-│   ├── lint-rules.R           # Rule S3 constructor, registry, and 14 built-in AST rules
+│   ├── lint-rules.R           # Rule S3 constructor, registry, and 17 built-in AST rules
 │   ├── lint-engine.R          # stat_lint(), stat_lint_text(), stat_lint_dir(), S3 methods
+│   ├── sarif.R                # export_statci_sarif() SARIF 2.1.0 JSON generator
 │   ├── audit-estimator.R      # audit_estimator() parameter recovery, coverage, Type-I, convergence
 │   ├── audit-sbc.R            # audit_sbc() Simulation-Based Calibration (Talts et al., 2018)
+│   ├── audit-power.R          # audit_power_curve() empirical power monotonicity & MDE
 │   ├── audit-parallel-rng.R   # check_parallel_rng() and statci_parallel_apply() L'Ecuyer streams
-│   ├── audit-manuscript.R     # audit_manuscript() prose parser, model extractor, rounding matcher
+│   ├── audit-manuscript.R     # audit_manuscript() prose/table/LaTeX parser & internal arithmetic
 │   ├── audit-sensitivity.R    # audit_sensitivity() winsorization, LOO/LOCO, missingness, bootstrap
 │   ├── report.R               # statci_report(), statci_check_gate(), render_statci_report()
-│   └── github-action.R        # use_statci_github_action() CI workflow generator
+│   └── github-action.R        # use_statci_github_action() hardened CI workflow generator
 ├── tests/testthat/            # Comprehensive edition-3 unit & integration tests
 └── vignettes/                 # Executable end-to-end documentation vignettes
 ```

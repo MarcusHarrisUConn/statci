@@ -20,3 +20,17 @@ R barplot and returns \code{x} invisibly.
 \description{
 Plot SBC rank histogram with expected uniformity band
 }
+\examples{
+sbc <- audit_sbc(
+  prior = function() c(mu = rnorm(1, 0, 2)),
+  dgp = function(th) rnorm(15, mean = th[["mu"]], sd = 1),
+  posterior_draws = function(y) {
+    pv <- 1 / (1 / 4 + length(y))
+    rnorm(49, mean = pv * sum(y), sd = sqrt(pv))
+  },
+  n_sim = 30L,
+  n_bins = 5L,
+  seed = 42L
+)
+plot(sbc)
+}

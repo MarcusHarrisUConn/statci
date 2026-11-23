@@ -15,6 +15,7 @@
 #' @param parallel_rng Optional standalone `"statci_parallel_rng"` object.
 #' @param manuscript Optional `"statci_manuscript_audit"` object.
 #' @param sensitivity Optional `"statci_sensitivity"` object.
+#' @param power_curve Optional `"statci_power_curve"` object.
 #' @param title Report title string.
 #' @param metadata Optional named list of custom metadata (e.g., git SHA,
 #'   project name).
@@ -34,6 +35,7 @@ statci_report <- function(lint = NULL,
                           parallel_rng = NULL,
                           manuscript = NULL,
                           sensitivity = NULL,
+                          power_curve = NULL,
                           title = "statci Statistical CI/CD Audit Report",
                           metadata = list()) {
   validate_opt <- function(obj, cls, arg) {
@@ -47,6 +49,7 @@ statci_report <- function(lint = NULL,
   validate_opt(parallel_rng, "statci_parallel_rng", "parallel_rng")
   validate_opt(manuscript, "statci_manuscript_audit", "manuscript")
   validate_opt(sensitivity, "statci_sensitivity", "sensitivity")
+  validate_opt(power_curve, "statci_power_curve", "power_curve")
 
   sec_rows <- list()
   add_sec <- function(name, checks, passed, warnings, failures, status, detail) {
@@ -152,6 +155,23 @@ statci_report <- function(lint = NULL,
     )
   }
 
+  if (!is.null(power_curve)) {
+    st_vec <- c(
+      power_curve$monotonicity$status,
+      if (isTRUE(power_curve$null_check$evaluated)) power_curve$null_check$status,
+      if (isTRUE(power_curve$target_check$evaluated)) power_curve$target_check$status
+    )
+    add_sec(
+      "Power-Curve Audit",
+      checks = length(st_vec),
+      passed = sum(st_vec == "pass"),
+      warnings = sum(st_vec == "warn"),
+      failures = sum(st_vec == "fail"),
+      status = power_curve$status,
+      detail = paste0(nrow(power_curve$curve), " grid point(s), MDE = ", fmt_num(power_curve$mde, 3L))
+    )
+  }
+
   sections <- if (length(sec_rows) > 0L) {
     tibble::as_tibble(do.call(rbind, sec_rows))
   } else {
@@ -184,7 +204,8 @@ statci_report <- function(lint = NULL,
         sbc = sbc,
         parallel_rng = parallel_rng,
         manuscript = manuscript,
-        sensitivity = sensitivity
+        sensitivity = sensitivity,
+        power_curve = power_curve
       ),
       metadata = meta,
       status = overall
@@ -489,6 +510,21 @@ build_markdown_report <- function(report, title) {
     out <- c(out, df_to_md_table(tbl), "")
   }
 
+  if (!is.null(comp$power_curve)) {
+    pc <- comp$power_curve
+    c_df <- pc$curve
+    tbl <- data.frame(
+      Effect = fmt_num(c_df$effect, 3L),
+      `Valid Reps` = c_df$n_valid,
+      Power = fmt_pct(c_df$power),
+      `95% CI` = paste0("[", fmt_pct(c_df$ci_low), ", ", fmt_pct(c_df$ci_high), "]"),
+      MCSE = fmt_num(c_df$mcse, 3L),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    out <- c(out, "## 5. Power-Curve Audit", "", df_to_md_table(tbl), "")
+  }
+
   paste(out, collapse = "\n")
 }
 
@@ -769,6 +805,26 @@ build_html_report <- function(report, title) {
     )
   }
 
+  # 5. Power-Curve section
+  if (!is.null(comp$power_curve)) {
+    pc <- comp$power_curve
+    c_df <- pc$curve
+    tbl <- data.frame(
+      Effect = fmt_num(c_df$effect, 3L),
+      `Valid Reps` = c_df$n_valid,
+      Power = fmt_pct(c_df$power),
+      `95% Clopper-Pearson CI` = paste0("[", fmt_pct(c_df$ci_low), ", ", fmt_pct(c_df$ci_high), "]"),
+      MCSE = fmt_num(c_df$mcse, 3L),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    body_parts <- c(
+      body_parts,
+      paste0("<section><h2>Power-Curve Audit ", html_pill(pc$status), "</h2>",
+             df_to_html_table(tbl), "</section>")
+    )
+  }
+
   paste0(
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
@@ -803,7 +859,9 @@ build_json_report <- function(report, title) {
     estimator_type1 = if (!is.null(report$components$estimator)) report$components$estimator$type1 else NULL,
     estimator_convergence = if (!is.null(report$components$estimator)) report$components$estimator$convergence else NULL,
     manuscript = if (!is.null(report$components$manuscript)) report$components$manuscript$checks else NULL,
-    sensitivity = if (!is.null(report$components$sensitivity)) report$components$sensitivity$results else NULL
+    manuscript_internal = if (!is.null(report$components$manuscript)) report$components$manuscript$internal_checks else NULL,
+    sensitivity = if (!is.null(report$components$sensitivity)) report$components$sensitivity$results else NULL,
+    power_curve = if (!is.null(report$components$power_curve)) report$components$power_curve$curve else NULL
   )
   as.character(jsonlite::toJSON(payload, auto_unbox = TRUE, pretty = TRUE, na = "null"))
 }

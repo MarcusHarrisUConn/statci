@@ -1,0 +1,8 @@
+bibentry(
+  bibtype = "Manual",
+  title = "statci: Statistical CI/CD, Calibration Fuzzing, and Manuscript Auditing",
+  author = person("Marcus", "Harris", email = "marcus.harris.uconn@gmail.com"),
+  year = "2026",
+  note = "R package version 0.3.0",
+  url = "https://marcusharrisphd.com/statci/"
+)

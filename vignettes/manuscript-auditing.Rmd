@@ -1,0 +1,115 @@
+---
+title: "Manuscript-to-Code Consistency Auditing for Quarto, RMarkdown & LaTeX"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Manuscript-to-Code Consistency Auditing for Quarto, RMarkdown & LaTeX}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+Copy-pasted numbers in research manuscripts routinely drift out of sync with fitted R models during peer review, sample filtering, or covariate revisions. `statci` verifies prose statistics, Markdown/Quarto tables, LaTeX `.tex` manuscripts, and internal statistical arithmetic directly against saved model objects.
+
+```{r setup}
+library(statci)
+```
+
+## 1. Auditing Prose and Markdown/Quarto Tables Together
+
+`audit_manuscript()` parses both inline APA prose (`b`, `SE`, `t(df)`, `F(df1, df2)`, `chi2(df)`, `95% CI`, `p`, `OR`, `r`, `R^2`, `N`, `AIC`, `BIC`) and Markdown/Quarto pipe tables:
+
+```{r qmd-table-demo}
+fit_mpg <- lm(mpg ~ wt, data = mtcars)
+
+qmd_path <- system.file("examples", "sample-manuscript.qmd", package = "statci")
+if (nzchar(qmd_path)) {
+  res_qmd <- audit_manuscript(qmd_path, models = list(primary = fit_mpg))
+  res_qmd
+  as_tibble(res_qmd)[, c("line", "term", "metric", "reported_raw", "actual", "issue_type", "status")]
+}
+```
+
+## 2. Catching Sign Flips, Rounding Discrepancies, Table Drift & Stale Sample Sizes
+
+Consider a manuscript where an author updated the model after dropping outliers, but forgot to update a sign in prose, entered a stale table cell, and left the old sample size `N = 40`:
+
+```{r catch-drift}
+drifted_md <- paste(
+  "<!-- statci: model=primary term=wt -->",
+  "Vehicle weight positively predicted MPG (*b* = 5.34, SE = 0.56, *p* < .001, *N* = 40).",
+  "",
+  "<!-- statci: model=primary -->",
+  "| Term | b | SE | t | 95% CI | p |",
+  "|---|---|---|---|---|---|",
+  "| wt | -5.33 | 0.56 | -9.56 | [-6.49, -4.20] | < .001 |",
+  sep = "\n"
+)
+
+drift_res <- audit_manuscript_text(drifted_md, models = list(primary = fit_mpg))
+drift_res
+as_tibble(drift_res)[, c("line", "metric", "reported_raw", "actual", "issue_type", "status")]
+```
+
+Notice how `statci` distinguishes:
+- **`sign_flip` (`fail`)**: `b = 5.34` vs actual `-5.3445`
+- **`stale_sample_size` (`fail`)**: `N = 40` vs actual `32`
+- **`rounding_discrepancy` (`warn`)**: table cell `-5.33` is off by 0.01 in the final decimal place relative to `-5.3445`.
+
+## 3. Auditing APA F-Statistics, Chi-Squared Tests & Scientific Notation
+
+`audit_manuscript()` handles `F(df1, df2) = ...`, `chi2(df) = ...` (including `\chi^2`), odds ratios (`OR`), Unicode minus signs, leading-dot decimals (`-.42`, `.003`), and scientific notation (`1.2e-4`, `1.2 \times 10^{-4}`):
+
+```{r apa-extras}
+ct_mat <- matrix(c(30, 10, 12, 28), nrow = 2)
+chi_fit <- suppressWarnings(chisq.test(ct_mat, correct = FALSE))
+chi_val <- formatC(as.numeric(chi_fit$statistic), digits = 2, format = "f")
+
+apa_txt <- paste0(
+  "<!-- statci: model=lm_fit -->\n",
+  "Overall regression was significant, F(1, 30) = 91.38, R^2 = 0.75, N = 32.\n",
+  "<!-- statci: model=chi_fit -->\n",
+  "Group proportions differed strongly, chi2(1) = ", chi_val, ", p < 1e-4."
+)
+
+audit_manuscript_text(apa_txt, models = list(lm_fit = fit_mpg, chi_fit = chi_fit))
+```
+
+## 4. Auditing LaTeX (`.tex`) Manuscripts and `tabular` Environments
+
+For journal submissions written in LaTeX, `audit_manuscript()` natively strips `%` comments and `verbatim` blocks, unwraps `\textit`/`\mathrm`/`\beta`/`\chi^2`, recognizes `% statci:` comment anchors, and audits `\begin{tabular}...\end{tabular}` rows:
+
+```{r tex-demo}
+tex_path <- system.file("examples", "sample-manuscript.tex", package = "statci")
+if (nzchar(tex_path)) {
+  res_tex <- audit_manuscript(tex_path, models = list(primary = fit_mpg))
+  res_tex
+}
+```
+
+## 5. Standalone Internal Arithmetic Cross-Checking (Even Without Saved Models)
+
+Even when no `.rds` model object is attached (`models = NULL`), `audit_manuscript_text(..., check_internal = TRUE)` uses **interval arithmetic** over rounding half-units to verify that reported `t`/`z` matches `b / SE` and that `95% CI` bounds are symmetric around `b` and consistent with `SE`:
+
+```{r internal-arithmetic}
+# Consistent clause passes
+ok_arith <- audit_manuscript_text(
+  "Effect of x: b = 0.42, SE = 0.11, t(98) = 3.82, 95% CI [0.20, 0.64].",
+  models = NULL
+)
+ok_arith
+ok_arith$internal_checks[, c("check_type", "reported_expr", "status", "detail")]
+
+# Copy-paste typo (t = 1.15 instead of 3.82; CI shifted right) fails automatically
+bad_arith <- audit_manuscript_text(
+  "Effect of x: b = 0.42, SE = 0.11, t(98) = 1.15, 95% CI [0.40, 0.90].",
+  models = NULL
+)
+bad_arith
+bad_arith$internal_checks[, c("check_type", "status", "detail")]
+```

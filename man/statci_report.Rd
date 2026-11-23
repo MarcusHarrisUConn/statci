@@ -11,6 +11,7 @@ statci_report(
   parallel_rng = NULL,
   manuscript = NULL,
   sensitivity = NULL,
+  power_curve = NULL,
   title = "statci Statistical CI/CD Audit Report",
   metadata = list()
 )
@@ -27,6 +28,8 @@ statci_report(
 \item{manuscript}{Optional \code{"statci_manuscript_audit"} object.}
 
 \item{sensitivity}{Optional \code{"statci_sensitivity"} object.}
+
+\item{power_curve}{Optional \code{"statci_power_curve"} object.}
 
 \item{title}{Report title string.}
 

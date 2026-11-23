@@ -39,6 +39,10 @@
 #'   artifacts are written (default `"statci-reports"`).
 #' @param upload_artifact Logical; include an `actions/upload-artifact` step
 #'   for HTML and Markdown audit reports? Default `TRUE`.
+#' @param upload_sarif Logical; if `TRUE`, export AST lint findings to SARIF
+#'   2.1.0 via [export_statci_sarif()] and add a
+#'   `github/codeql-action/upload-sarif` step (also adds
+#'   `security-events: write` permission). Default `FALSE`.
 #' @param overwrite Logical; overwrite existing workflow file? Default `FALSE`.
 #'
 #' @return Invisibly returns the normalized path to the generated YAML file.
@@ -61,6 +65,7 @@ use_statci_github_action <- function(path = ".",
                                      audit_script = NULL,
                                      report_dir = "statci-reports",
                                      upload_artifact = TRUE,
+                                     upload_sarif = FALSE,
                                      overwrite = FALSE) {
   fail_on <- match.arg(fail_on)
   validate_existing_dir(path, arg = "path")
@@ -139,12 +144,32 @@ use_statci_github_action <- function(path = ".",
       "          rep <- statci::statci_report(lint = lint_res, manuscript = ms_res)",
       "          statci::render_statci_report(rep, output_file = file.path(report_dir, \"statci-report.html\"), format = \"html\")",
       "          md <- statci::render_statci_report(rep, output_file = file.path(report_dir, \"statci-report.md\"), format = \"markdown\")",
+      if (isTRUE(upload_sarif)) "          statci::export_statci_sarif(lint_res, output_file = file.path(report_dir, \"statci.sarif\"), base_uri = \".\")",
       "          summary_file <- Sys.getenv(\"GITHUB_STEP_SUMMARY\")",
       "          if (nzchar(summary_file)) cat(readLines(md, warn = FALSE), sep = \"\\n\", file = summary_file, append = TRUE)",
       "          print(rep)",
       "          statci::statci_check_gate(rep, fail_on = fail_on)"
     )
   }
+
+  sarif_block <- if (isTRUE(upload_sarif)) {
+    c(
+      "",
+      "      - name: Upload SARIF results to GitHub Code Scanning",
+      "        if: always()",
+      "        uses: github/codeql-action/upload-sarif@v3",
+      "        with:",
+      paste0("          sarif_file: ", safe_yaml_scalar(paste0(report_dir, "/statci.sarif"), "report_dir"))
+    )
+  } else {
+    character(0)
+  }
+
+  perm_lines <- c(
+    "permissions:",
+    "  contents: read",
+    if (isTRUE(upload_sarif)) "  security-events: write"
+  )
 
   artifact_block <- if (isTRUE(upload_artifact)) {
     c(
@@ -172,8 +197,7 @@ use_statci_github_action <- function(path = ".",
     paste0("    branches: ", branch_yaml),
     "  workflow_dispatch:",
     "",
-    "permissions:",
-    "  contents: read",
+    perm_lines,
     "",
     "jobs:",
     "  statci-audit:",
@@ -202,6 +226,7 @@ use_statci_github_action <- function(path = ".",
     env_block,
     "        run: |",
     r_step_lines,
+    sarif_block,
     artifact_block
   )
 

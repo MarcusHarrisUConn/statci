@@ -2,26 +2,29 @@
 % Please edit documentation in R/audit-manuscript.R
 \name{audit_manuscript_text}
 \alias{audit_manuscript_text}
-\title{Audit manuscript prose supplied as an in-memory string}
+\title{Audit manuscript prose or tables supplied as an in-memory string}
 \usage{
 audit_manuscript_text(
   text,
-  models,
+  models = NULL,
   tol_extra = 0,
   warn_rounding = TRUE,
-  default_model = NULL
+  default_model = NULL,
+  format = c("auto", "markdown", "tex"),
+  check_internal = TRUE
 )
 }
 \arguments{
 \item{text}{Character scalar or vector of manuscript lines.}
 
-\item{models}{One of:
+\item{models}{Optional saved models to cross-check against. One of:
 \itemize{
 \item A named list of fitted model objects (\code{lm}, \code{glm}, \code{lmerMod}, \code{htest})
 or tidy summary data frames;
 \item A single fitted model object or tidy summary data frame;
 \item Path to an \code{.rds} file containing a model or named list of models;
-\item Path to a directory containing \code{.rds} model files (keyed by filename stem).
+\item Path to a directory containing \code{.rds} model files (keyed by filename stem);
+\item \code{NULL} to run internal arithmetic consistency checks only.
 }}
 
 \item{tol_extra}{Non-negative numeric extra tolerance added on top of the
@@ -33,12 +36,20 @@ unit in the last reported decimal place are flagged as \code{"warn"}
 
 \item{default_model}{Optional default model name used for untagged claims
 when multiple models are provided.}
+
+\item{format}{Document format: \code{"auto"} (detects LaTeX commands
+automatically), \code{"markdown"} (Quarto/RMarkdown), or \code{"tex"} (LaTeX).}
+
+\item{check_internal}{Logical; if \code{TRUE} (default), run interval-arithmetic
+internal consistency checks (\code{t} vs \code{b / SE}, \verb{95\% CI} midpoint & width
+vs \code{b} and \code{SE}) on every claim group and table row.}
 }
 \value{
 An S3 object of class \code{"statci_manuscript_audit"}.
 }
 \description{
-In-memory counterpart to \code{\link[=audit_manuscript]{audit_manuscript()}}.
+In-memory counterpart to \code{\link[=audit_manuscript]{audit_manuscript()}}, supporting Markdown/Quarto
+and LaTeX (\code{.tex}) prose, tables, and internal arithmetic verification.
 }
 \examples{
 fit <- lm(mpg ~ wt, data = mtcars)

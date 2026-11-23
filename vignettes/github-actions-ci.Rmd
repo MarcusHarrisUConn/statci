@@ -1,0 +1,116 @@
+---
+title: "Configuring .statci.yml, SARIF Code Scanning & GitHub Actions CI"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Configuring .statci.yml, SARIF Code Scanning & GitHub Actions CI}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+This vignette shows how to wire `statci` into reproducible research repositories and R packages using declarative `.statci.yml` project configuration, `statci_audit_project()`, SARIF 2.1.0 GitHub Code Scanning annotations, and hardened GitHub Actions workflows.
+
+```{r setup}
+library(statci)
+```
+
+## 1. Declarative Project Configuration with `.statci.yml`
+
+`read_statci_config()` parses `.statci.yml` with `eval.expr = FALSE` (preventing arbitrary R code evaluation during YAML loading) and validates every rule ID, severity override, relative path, report format, and CI gate setting:
+
+```{r config-demo}
+tmp_proj <- tempfile("statci_ci_demo_")
+dir.create(file.path(tmp_proj, "R"), recursive = TRUE)
+dir.create(file.path(tmp_proj, "models"), recursive = TRUE)
+
+# Write a clean analysis script and a saved model + manuscript
+clean_src <- system.file("examples", "clean-analysis.R", package = "statci")
+if (nzchar(clean_src)) {
+  file.copy(clean_src, file.path(tmp_proj, "R", "analysis.R"))
+} else {
+  writeLines(c("set.seed(2026)", "x <- rnorm(50)"), file.path(tmp_proj, "R", "analysis.R"))
+}
+
+fit <- lm(mpg ~ wt, data = mtcars)
+saveRDS(list(primary = fit), file.path(tmp_proj, "models", "fits.rds"))
+
+writeLines(c(
+  "<!-- statci: model=primary term=wt -->",
+  "Vehicle weight predicted MPG (*b* = -5.34, SE = 0.56, *p* < .001, *N* = 32)."
+), file.path(tmp_proj, "manuscript.qmd"))
+
+writeLines(c(
+  "version: 1",
+  "lint:",
+  "  paths: [R]",
+  "  exclude_rules: [cor_without_use_arg]",
+  "  severity_overrides:",
+  "    short_logical_literal: error",
+  "manuscript:",
+  "  path: manuscript.qmd",
+  "  models: models/fits.rds",
+  "gate:",
+  "  fail_on: fail",
+  "report:",
+  "  title: \"Automated Study CI Audit\"",
+  "  output_dir: statci-reports",
+  "  formats: [html, markdown, sarif]"
+), file.path(tmp_proj, ".statci.yml"))
+
+cfg <- read_statci_config(file.path(tmp_proj, ".statci.yml"))
+cfg
+```
+
+## 2. One-Call Project Orchestration (`statci_audit_project()`)
+
+`statci_audit_project()` discovers `.statci.yml`, runs AST linting with project severity overrides, audits the configured manuscript, writes HTML/Markdown/SARIF artifacts, and enforces the quality gate:
+
+```{r orchestrate}
+proj_rep <- statci_audit_project(tmp_proj, enforce_gate = TRUE)
+proj_rep
+basename(proj_rep$artifacts)
+```
+
+## 3. SARIF 2.1.0 Export for GitHub Code Scanning
+
+`export_statci_sarif()` converts AST lint diagnostics into standard SARIF 2.1.0 JSON so findings appear directly as inline annotations on pull-request diffs in GitHub Code Scanning:
+
+```{r sarif-demo}
+flawed_lint <- stat_lint_text("x <- rnorm(10)\nm <- mean(x, na.rm = T)\n")
+sarif_txt <- export_statci_sarif(flawed_lint)
+sarif_obj <- jsonlite::fromJSON(sarif_txt)
+list(
+  version = sarif_obj$version,
+  tool = sarif_obj$runs$tool$driver$name,
+  n_results = nrow(sarif_obj$runs$results[[1]])
+)
+```
+
+## 4. Generating Hardened GitHub Actions Workflows
+
+`use_statci_github_action()` generates a security-hardened `.github/workflows/statci.yaml` that:
+- Validates all branch names, R versions, and project-relative paths against YAML/shell/R injection;
+- Passes all configuration via workflow `env:` variables with zero untrusted string interpolation in `run:`;
+- Pins action versions and disables checkout credential persistence (`persist-credentials: false`);
+- Optionally enables SARIF 2.1.0 upload to GitHub Code Scanning (`upload_sarif = TRUE`).
+
+```{r gha-gen}
+wf <- use_statci_github_action(
+  path = tmp_proj,
+  branches = c("main"),
+  r_version = "release",
+  lint_paths = c("R"),
+  manuscript = "manuscript.qmd",
+  models_path = "models/fits.rds",
+  upload_sarif = TRUE
+)
+cat(head(readLines(wf), 34), sep = "\n")
+
+unlink(tmp_proj, recursive = TRUE)
+```
