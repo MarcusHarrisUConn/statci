@@ -1,0 +1,173 @@
+---
+title: "Estimator Calibration Fuzzing, SBC, Parallel RNG & Adversarial Sensitivity"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimator Calibration Fuzzing, SBC, Parallel RNG & Adversarial Sensitivity}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+Deterministic unit tests confirm that code runs without syntax errors, but they cannot tell you whether a custom statistical estimator is unbiased, whether its confidence intervals achieve nominal 95% coverage, whether a Bayesian posterior sampler is calibrated, whether parallel execution depends on core count, or whether an applied conclusion collapses when a single outlier or cluster is removed.
+
+This vignette demonstrates `statci`'s probabilistic verification and robustness tools:
+
+1. **Estimator Calibration Fuzzing (`audit_estimator()`)** with Monte Carlo SE-aware thresholds.
+2. **Simulation-Based Calibration (`audit_sbc()`)** for posterior samplers (Talts et al., 2018).
+3. **Parallel RNG Invariance (`check_parallel_rng()` & `statci_parallel_apply()`)**.
+4. **Adversarial Sensitivity & Robustness Battery (`audit_sensitivity()`)**.
+
+```{r setup}
+library(statci)
+```
+
+## 1. Estimator Calibration & Fuzzing
+
+`audit_estimator()` pairs a user-supplied data-generating process (`dgp`) with an `estimator` and evaluates bias ($z$-score vs. Monte Carlo SE), RMSE, empirical-vs-model SE ratio, exact Clopper-Pearson interval coverage, Type-I error under null parameters, and convergence/singularity rates.
+
+### Case A: Well-Calibrated OLS Estimator
+
+```{r est-pass}
+ols_audit <- audit_estimator(
+  dgp = function() {
+    x <- rnorm(100)
+    z <- rnorm(100)
+    y <- 1.0 + 0.75 * x + 0.0 * z + rnorm(100, sd = 1.0)
+    data.frame(x = x, z = z, y = y)
+  },
+  estimator = function(df) lm(y ~ x + z, data = df),
+  true_params = c(x = 0.75, z = 0.0),
+  n_sim = 120L,
+  seed = 2026L
+)
+ols_audit
+```
+
+Because `z = 0.0`, `audit_estimator()` automatically evaluates Type-I error calibration on `z` alongside parameter recovery on both `x` and `z`.
+
+### Case B: Catching a Biased, Anti-Conservative Custom Estimator
+
+Now suppose a custom estimator has subtle bias and underestimates its standard error by 50%:
+
+```{r est-fail}
+flawed_audit <- audit_estimator(
+  dgp = function() rnorm(60, mean = 1.5, sd = 1.0),
+  estimator = function(y) {
+    list(
+      estimate = c(mu = mean(y) + 0.35),
+      se = c(mu = 0.5 * sd(y) / sqrt(length(y)))
+    )
+  },
+  true_params = c(mu = 1.5),
+  n_sim = 120L,
+  seed = 2026L
+)
+flawed_audit
+```
+
+`audit_estimator()` immediately flags the bias ($z \gg 3$), severe SE deflation (`se_ratio` $\approx 0.5$), and collapsed interval coverage.
+
+## 2. Simulation-Based Calibration (SBC)
+
+For Bayesian or posterior-draw estimators, `audit_sbc()` draws $\tilde\theta \sim p(\theta)$, simulates $\tilde y \sim p(y \mid \tilde\theta)$, computes rank statistics of $\tilde\theta$ among $L$ posterior draws, and tests rank uniformity via Pearson's $\chi^2$ and Kolmogorov-Smirnov tests:
+
+```{r sbc-demo}
+# Exact Normal-Normal conjugate posterior (calibrated)
+sbc_ok <- audit_sbc(
+  prior = function() c(mu = rnorm(1, mean = 0, sd = 2)),
+  dgp = function(theta) rnorm(20, mean = theta[["mu"]], sd = 1),
+  posterior_draws = function(y) {
+    post_var <- 1 / (1 / 4 + length(y))
+    post_mean <- post_var * sum(y)
+    rnorm(99, mean = post_mean, sd = sqrt(post_var))
+  },
+  n_sim = 100L,
+  n_bins = 10L,
+  seed = 42L
+)
+sbc_ok
+
+# Miscalibrated posterior with systematic shift and underdispersion
+sbc_bad <- audit_sbc(
+  prior = function() c(mu = rnorm(1, mean = 0, sd = 2)),
+  dgp = function(theta) rnorm(20, mean = theta[["mu"]], sd = 1),
+  posterior_draws = function(y) {
+    post_var <- 1 / (1 / 4 + length(y))
+    post_mean <- post_var * sum(y) + 0.5
+    rnorm(99, mean = post_mean, sd = 0.3 * sqrt(post_var))
+  },
+  n_sim = 100L,
+  n_bins = 10L,
+  seed = 42L
+)
+sbc_bad
+```
+
+## 3. Parallel RNG Invariance Across Core Counts
+
+Standard parallel helpers in R assign one RNG stream per *worker process*, meaning Monte Carlo results silently change when moving from 1 core on a laptop to 2 or 16 cores in CI. `statci_parallel_apply()` assigns one independent `"L'Ecuyer-CMRG"` stream per *task*, and `check_parallel_rng()` verifies exact invariance across core counts:
+
+```{r parallel-rng}
+par_audit <- check_parallel_rng(
+  fun = function(i) mean(rnorm(50)),
+  X = seq_len(6L),
+  cores = c(1L, 2L),
+  seed = 123L
+)
+par_audit
+```
+
+## 4. Adversarial Sensitivity & Robustness Battery
+
+`audit_sensitivity()` automatically subjects any modeling pipeline to tail winsorization, leave-one-cluster-out (LOCO) or leave-one-out jackknife influence, missingness/imputation stress tests, and cluster or observation bootstrapping.
+
+Let's compare a robust dataset against an outlier-fragile dataset where a single point reverses the estimated slope:
+
+```{r sensitivity-demo}
+set.seed(11)
+n <- 45L
+x <- rnorm(n, sd = 0.6)
+y <- -0.7 * x + rnorm(n, sd = 0.3)
+
+# Inject one extreme leverage outlier that flips the OLS slope positive
+x_fragile <- x
+y_fragile <- y
+x_fragile[1] <- 10
+y_fragile[1] <- 15
+df_fragile <- data.frame(x = x_fragile, y = y_fragile)
+
+sens_fragile <- audit_sensitivity(
+  data = df_fragile,
+  fit_fn = function(d) lm(y ~ x, data = d),
+  winsor_probs = c(0.05),
+  missingness_rates = c(0.05),
+  n_boot = 40L,
+  max_loo_units = 45L,
+  seed = 42L
+)
+sens_fragile
+as_tibble(sens_fragile)[, c("category", "scenario", "baseline", "perturbed", "sign_flip", "status")]
+```
+
+Notice how both tail winsorization and leave-one-out influence immediately identify observation `1` as the single driver of the sign reversal and fail the robustness gate.
+
+## 5. Unified Report Assembly
+
+All verification pillars compose cleanly into a single `statci_report()` ready for standalone HTML or Markdown output in CI:
+
+```{r unified-report}
+final_rep <- statci_report(
+  estimator = ols_audit,
+  sbc = sbc_ok,
+  parallel_rng = par_audit,
+  sensitivity = sens_fragile,
+  title = "Calibration & Robustness Verification"
+)
+final_rep
+```
