@@ -3,6 +3,7 @@ allowlist
 APA
 AST
 biomet
+canonicalization
 canonicalized
 Clopper
 CMRG
@@ -28,6 +29,7 @@ MCAR
 MCSE
 mitigations
 natively
+NTFS
 onboarding
 positionally
 Pre

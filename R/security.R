@@ -117,23 +117,44 @@ validate_safe_diff_rel_path <- function(x, arg = "diff file path") {
   x
 }
 
+#' Check whether a normalized path lies within a canonical root directory
+#'
+#' Handles trailing slashes uniformly and uses case-insensitive prefix matching
+#' on Windows (where drive letters and NTFS directory names are case-insensitive).
+#'
+#' @param candidate Normalized candidate path (using `/` separators).
+#' @param root_norm Canonicalized root directory path (using `/` separators).
+#' @param allow_equal Logical; allow `candidate` equal to `root_norm`?
+#' @return Logical scalar.
+#' @noRd
+is_path_within_root <- function(candidate, root_norm, allow_equal = FALSE) {
+  cand <- sub("/+$", "", gsub("\\\\", "/", candidate))
+  root <- sub("/+$", "", gsub("\\\\", "/", root_norm))
+  if (identical(.Platform$OS.type, "windows")) {
+    cand <- tolower(cand)
+    root <- tolower(root)
+  }
+  prefix <- paste0(root, "/")
+  startsWith(cand, prefix) || (isTRUE(allow_equal) && identical(cand, root))
+}
+
 #' Validate that a relative file/directory destination resolves inside a target root dir
 #'
 #' Walks every existing ancestor and symlink component of `rel_file` under
-#' `root_dir`, resolving symlinks via `normalizePath(..., mustWork = TRUE)` so
-#' non-existent leaf files/subdirectories inside a symlinked parent directory
-#' can never escape `root_dir`.
+#' `root_dir`, resolving existing segments via `normalizePath(..., winslash = "/", mustWork = TRUE)`
+#' so Windows 8.3 short names (`RUNNER~1`) expand consistently and non-existent
+#' leaf files/subdirectories inside a symlinked parent directory can never
+#' escape `root_dir`.
 #'
 #' @param root_dir Existing root directory.
 #' @param rel_file Project-relative file or directory path.
 #' @param arg Argument name for error messages.
 #' @param allow_root Logical; permit resolving to `root_dir` itself (e.g. `"."`).
-#' @return Resolved path string inside `root_dir`.
+#' @return Resolved path string inside `root_dir` (using `/` separators).
 #' @noRd
 validate_contained_dest <- function(root_dir, rel_file, arg = "file", allow_root = FALSE) {
   validate_safe_rel_path(rel_file, arg = arg)
   root_norm <- sub("/+$", "", normalizePath(root_dir, winslash = "/", mustWork = TRUE))
-  prefix <- paste0(root_norm, "/")
 
   segs <- strsplit(rel_file, "/", fixed = TRUE)[[1L]]
   segs <- segs[nzchar(segs) & segs != "."]
@@ -145,10 +166,11 @@ validate_contained_dest <- function(root_dir, rel_file, arg = "file", allow_root
     rlang::abort(paste0("`", arg, "` must name a path inside project directory `", root_dir, "`."))
   }
 
-  # Inspect every path component from root downward to block symlink escapes
+  # Inspect every path component from canonical root downward to block symlink escapes
+  # and avoid mustWork = FALSE short-path mismatches on Windows.
   cur <- root_norm
   for (seg in segs) {
-    cur <- file.path(cur, seg)
+    cur <- paste0(cur, "/", seg)
     link_target <- tryCatch(Sys.readlink(cur), error = function(e) "")
     is_link <- !is.na(link_target) && nzchar(link_target)
     exists_now <- file.exists(cur) || dir.exists(cur)
@@ -160,18 +182,17 @@ validate_contained_dest <- function(root_dir, rel_file, arg = "file", allow_root
         sub("/+$", "", normalizePath(cur, winslash = "/", mustWork = TRUE)),
         error = function(e) NA_character_
       )
-      if (is.na(cur_real) || (!identical(cur_real, root_norm) && !startsWith(cur_real, prefix))) {
+      if (is.na(cur_real) || !is_path_within_root(cur_real, root_norm, allow_equal = TRUE)) {
         rlang::abort(paste0("`", arg, "` resolves outside project directory `", root_dir, "` via symbolic link."))
       }
+      cur <- cur_real
     }
   }
 
-  dest_raw <- file.path(root_norm, paste(segs, collapse = "/"))
-  dest_norm <- sub("/+$", "", normalizePath(dest_raw, winslash = "/", mustWork = FALSE))
-  if (!startsWith(dest_norm, prefix) && !(isTRUE(allow_root) && identical(dest_norm, root_norm))) {
+  if (!is_path_within_root(cur, root_norm, allow_equal = isTRUE(allow_root))) {
     rlang::abort(paste0("`", arg, "` resolves outside project directory `", root_dir, "`."))
   }
-  dest_raw
+  cur
 }
 
 #' Validate R version specifier for GitHub Actions setup-r
@@ -248,8 +269,7 @@ is_safe_contained_file <- function(file_path, root_dir) {
   root_real <- normalizePath(root_dir, winslash = "/", mustWork = TRUE)
   file_real <- tryCatch(normalizePath(file_path, winslash = "/", mustWork = TRUE), error = function(e) NA_character_)
   if (is.na(file_real)) return(FALSE)
-  prefix <- paste0(sub("/+$", "", root_real), "/")
-  startsWith(file_real, prefix)
+  is_path_within_root(file_real, root_real, allow_equal = FALSE)
 }
 
 #' Strictly validate a Git ref name (blocking option injection and shell chars)

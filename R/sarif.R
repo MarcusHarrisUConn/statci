@@ -39,7 +39,7 @@ export_statci_sarif <- function(lint,
     rlang::abort("`lint` must be a `statci_lint` or `statci_report` object.")
   }
 
-  pkg_ver <- tool_version %||% tryCatch(as.character(utils::packageVersion("statci")), error = function(e) "0.5.0")
+  pkg_ver <- tool_version %||% tryCatch(as.character(utils::packageVersion("statci")), error = function(e) "0.5.1")
   sev_to_sarif <- function(s) {
     switch(tolower(as.character(s)), error = "error", warning = "warning", info = "note", "warning")
   }
@@ -74,11 +74,22 @@ export_statci_sarif <- function(lint,
   # Normalize artifact URIs cleanly relative to base_uri and RFC-3986 percent-encode
   base_prefix <- NULL
   if (!is.null(base_uri) && nzchar(base_uri)) {
-    base_norm <- normalizePath(base_uri, winslash = "/", mustWork = FALSE)
+    base_norm <- tryCatch(
+      normalizePath(base_uri, winslash = "/", mustWork = dir.exists(base_uri)),
+      error = function(e) gsub("\\\\", "/", base_uri)
+    )
     base_prefix <- paste0(sub("/+$", "", base_norm), "/")
   }
-  cwd_norm <- tryCatch(normalizePath(getwd(), winslash = "/", mustWork = FALSE), error = function(e) NULL)
+  cwd_norm <- tryCatch(normalizePath(getwd(), winslash = "/", mustWork = TRUE), error = function(e) NULL)
   cwd_prefix <- if (!is.null(cwd_norm) && nzchar(cwd_norm)) paste0(sub("/+$", "", cwd_norm), "/") else NULL
+
+  strip_dir_prefix <- function(path_str, dir_prefix) {
+    if (is.null(dir_prefix) || !nzchar(dir_prefix)) return(NULL)
+    is_win <- identical(.Platform$OS.type, "windows")
+    lhs <- if (is_win) tolower(path_str) else path_str
+    rhs <- if (is_win) tolower(dir_prefix) else dir_prefix
+    if (startsWith(lhs, rhs)) substring(path_str, nchar(dir_prefix) + 1L) else NULL
+  }
 
   encode_uri_path <- function(rel_path) {
     segs <- strsplit(rel_path, "/", fixed = TRUE)[[1L]]
@@ -101,18 +112,17 @@ export_statci_sarif <- function(lint,
     f_clean <- strip_control_chars(as.character(f), allow_newline = FALSE)
     if (startsWith(f_clean, "<text")) return("inline.R")
     f_norm <- gsub("\\\\", "/", f_clean)
-    f_real <- tryCatch(normalizePath(f_clean, winslash = "/", mustWork = FALSE), error = function(e) f_norm)
-    if (!is.null(base_prefix) && startsWith(f_real, base_prefix)) {
-      f_norm <- substring(f_real, nchar(base_prefix) + 1L)
-    } else if (!is.null(base_prefix) && startsWith(f_norm, base_prefix)) {
-      f_norm <- substring(f_norm, nchar(base_prefix) + 1L)
+    f_real <- tryCatch(
+      normalizePath(f_clean, winslash = "/", mustWork = file.exists(f_clean)),
+      error = function(e) f_norm
+    )
+    rel_base <- strip_dir_prefix(f_real, base_prefix) %||% strip_dir_prefix(f_norm, base_prefix)
+    if (!is.null(rel_base)) {
+      f_norm <- rel_base
     } else if (grepl("^(/|[A-Za-z]:/)", f_norm)) {
       # Never leak host absolute filesystem paths when base_uri is omitted or doesn't match
-      if (!is.null(cwd_prefix) && startsWith(f_real, cwd_prefix)) {
-        f_norm <- substring(f_real, nchar(cwd_prefix) + 1L)
-      } else {
-        f_norm <- basename(f_norm)
-      }
+      rel_cwd <- strip_dir_prefix(f_real, cwd_prefix) %||% strip_dir_prefix(f_norm, cwd_prefix)
+      f_norm <- if (!is.null(rel_cwd)) rel_cwd else basename(f_norm)
     }
     f_norm <- sub("^\\./", "", f_norm)
     encode_uri_path(f_norm)

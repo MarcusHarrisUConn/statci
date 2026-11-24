@@ -1,7 +1,7 @@
 ---
 title: "statci: Statistical CI/CD & Verification Field Guide"
 author: "Marcus Harris"
-date: "Version 0.5.0 (2026)"
+date: "Version 0.5.1 (2026)"
 output:
   pdf_document:
     toc: true

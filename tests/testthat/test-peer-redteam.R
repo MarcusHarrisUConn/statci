@@ -13,8 +13,9 @@ test_that("H1: symlinked ancestor write escapes are blocked in GHA and project a
   dir.create(outside, recursive = TRUE)
   withr::defer(unlink(c(proj, outside), recursive = TRUE, force = TRUE))
 
-  ok_link <- isTRUE(suppressWarnings(file.symlink(outside, file.path(proj, "out_link"))))
-  skip_if_not(ok_link, "symlink creation unsupported")
+  if (!isTRUE(suppressWarnings(file.symlink(outside, file.path(proj, "out_link"))))) {
+    skip("Symlinks unavailable on this OS")
+  }
 
   # 1. use_statci_github_action must refuse writing through symlinked parent dir
   expect_error(
@@ -49,11 +50,12 @@ test_that("H1: symlinked ancestor write escapes are blocked in GHA and project a
 
   # 4. Dangling symlink component must also be rejected
   dangling_target <- file.path(outside, "does_not_exist")
-  suppressWarnings(file.symlink(dangling_target, file.path(proj, "dangling_link")))
-  expect_error(
-    use_statci_github_action(path = proj, file = "dangling_link/ci.yaml"),
-    "symbolic link|symlink|escapes|outside"
-  )
+  if (isTRUE(suppressWarnings(file.symlink(dangling_target, file.path(proj, "dangling_link"))))) {
+    expect_error(
+      use_statci_github_action(path = proj, file = "dangling_link/ci.yaml"),
+      "symbolic link|symlink|escapes|outside"
+    )
+  }
 })
 
 # ==============================================================================
@@ -69,8 +71,9 @@ test_that("H2: symlinked lint.paths escaping project root are rejected", {
   withr::defer(unlink(c(proj, ext), recursive = TRUE, force = TRUE))
 
   writeLines("secret_key <- 'TOP_SECRET'; x <- rnorm(5)", file.path(ext, "leak.R"))
-  ok_link <- isTRUE(suppressWarnings(file.symlink(ext, file.path(proj, "R_ext_link"))))
-  skip_if_not(ok_link, "symlink creation unsupported")
+  if (!isTRUE(suppressWarnings(file.symlink(ext, file.path(proj, "R_ext_link"))))) {
+    skip("Symlinks unavailable on this OS")
+  }
 
   writeLines(
     c("version: 1", "lint:", "  paths: [R_ext_link]"),
@@ -320,7 +323,7 @@ test_that("M1: stat_lint_diff() handles spaces, parens, UTF-8, quoted diff, and 
 
     writeLines("x <- rnorm(10)", "my analysis.R")
     writeLines("y <- runif(10)", "caf\u00e9.R")
-    system2("git", c("add", shQuote("my analysis.R"), shQuote("caf\u00e9.R")))
+    system2("git", c("add", "--all"))
 
     res_git <- stat_lint_diff(path = gdir, staged = TRUE, rules = "unseeded_randomness")
     expect_equal(nrow(res_git$findings), 2L)
@@ -370,19 +373,27 @@ test_that("M3: export_statci_sarif() emits integer >= 1, RFC-3986 URIs, and no h
   expect_identical(reg$startLine, 1L)
   expect_identical(reg$startColumn, 1L)
 
-  # 2. Percent-encoding of #, ?, %, space
+  # 2. Percent-encoding of #, ?, %, space (use NTFS-safe name on disk + query-char check)
   d <- tempfile("statci_m3_")
   dir.create(d, recursive = TRUE)
   withr::defer(unlink(d, recursive = TRUE, force = TRUE))
 
-  f <- file.path(d, "file #1?a=b%.R")
+  f <- file.path(d, "file #1 a=b%.R")
   writeLines("x <- rnorm(10)", f)
   res_lint <- stat_lint(f, rules = "unseeded_randomness")
 
   j2 <- export_statci_sarif(res_lint, base_uri = d)
   parsed2 <- jsonlite::fromJSON(j2, simplifyVector = FALSE)
   uri2 <- parsed2$runs[[1L]]$results[[1L]]$locations[[1L]]$physicalLocation$artifactLocation$uri
-  expect_identical(uri2, "file%20%231%3Fa%3Db%25.R")
+  expect_identical(uri2, "file%20%231%20a%3Db%25.R")
+
+  # Verify `?` is also RFC-3986 percent-encoded (tested synthetically for Windows NTFS compatibility)
+  res_q <- res_lint
+  res_q$findings$file <- "sub/file #1?a=b%.R"
+  j2q <- export_statci_sarif(res_q)
+  parsed2q <- jsonlite::fromJSON(j2q, simplifyVector = FALSE)
+  uri2q <- parsed2q$runs[[1L]]$results[[1L]]$locations[[1L]]$physicalLocation$artifactLocation$uri
+  expect_identical(uri2q, "sub/file%20%231%3Fa%3Db%25.R")
 
   # 3. base_uri = NULL must not leak absolute host paths
   j3 <- export_statci_sarif(res_lint, base_uri = NULL)
@@ -391,9 +402,10 @@ test_that("M3: export_statci_sarif() emits integer >= 1, RFC-3986 URIs, and no h
   uri3 <- r3$locations[[1L]]$physicalLocation$artifactLocation$uri
   fp3 <- r3$partialFingerprints$primaryLocationLineHash
   expect_false(startsWith(uri3, "/"))
+  expect_false(grepl("^[A-Za-z]:/", uri3))
   expect_false(grepl("statci_m3_", uri3, fixed = TRUE))
   expect_false(grepl("statci_m3_", fp3, fixed = TRUE))
-  expect_identical(uri3, "file%20%231%3Fa%3Db%25.R")
+  expect_identical(uri3, "file%20%231%20a%3Db%25.R")
 })
 
 # ==============================================================================

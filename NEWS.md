@@ -1,3 +1,12 @@
+# statci 0.5.1
+
+## Cross-Platform CI & Windows Path Hardening
+- Updated `.github/workflows/R-CMD-check.yaml`, `.github/workflows/pkgdown.yaml`, and `use_statci_github_action()` (`R/github-action.R`) to floating major tags (`actions/checkout@v4`, `r-lib/actions/setup-pandoc@v2`, `r-lib/actions/setup-r@v2`, `r-lib/actions/setup-r-dependencies@v2`, `r-lib/actions/check-r-package@v2`, and `actions/upload-artifact@v4`), resolving the Ubuntu `sudo -E` / `R_LIB_FOR_PAK` failure in older pinned `r-lib/actions@v2.11.2` while preserving `persist-credentials: false` and all workflow security hardening.
+- Hardened Windows path canonicalization and containment across `R/security.R` (`validate_contained_dest()`, `is_safe_contained_file()`, `is_path_within_root()`), `R/sarif.R`, and `R/lint-diff.R`:
+  - Consistently expands Windows 8.3 short paths (`RUNNER~1`) via `normalizePath(..., winslash = "/", mustWork = TRUE)` along existing ancestors instead of comparing against `mustWork = FALSE`.
+  - Applies case-insensitive root-prefix checks on Windows (`.Platform$OS.type == "windows"`).
+  - Strips CRLF `\r` endings and preserves UTF-8 encoding in `stat_lint_diff()`, and ensures all regression tests use NTFS-compatible filenames and gracefully skip symlink assertions when the OS denies unprivileged symlinks.
+
 # statci 0.5.0
 
 ## Security Hardening & Independent Peer Red-Team Remediation

@@ -136,7 +136,10 @@ test_that("use_statci_github_action blocks YAML, shell, R-code, branch, and path
     models_path = "models/fits.rds"
   )
   txt <- paste(readLines(wf, warn = FALSE), collapse = "\n")
-  expect_match(txt, "actions/checkout@v4\\.2\\.2")
+  expect_match(txt, "actions/checkout@v4")
+  expect_match(txt, "r-lib/actions/setup-r@v2")
+  expect_match(txt, "r-lib/actions/setup-r-dependencies@v2")
+  expect_match(txt, "actions/upload-artifact@v4")
   expect_match(txt, "persist-credentials: false", fixed = TRUE)
   expect_match(txt, "STATCI_LINT_PATHS: 'R,analysis'", fixed = TRUE)
   expect_match(txt, "STATCI_MANUSCRIPT: 'paper/main.qmd'", fixed = TRUE)
@@ -160,7 +163,9 @@ test_that("audit_manuscript and stat_lint_dir reject symlink escapes and danglin
 
   # Dangling symlink rejected by stat_lint()
   bad_link <- file.path(tmp, "broken.R")
-  file.symlink(file.path(tmp, "does_not_exist.R"), bad_link)
+  if (!isTRUE(suppressWarnings(file.symlink(file.path(tmp, "does_not_exist.R"), bad_link)))) {
+    skip("Symlinks unavailable on this OS")
+  }
   expect_error(stat_lint(bad_link), "broken|dangling")
 
   # Symlink escaping models directory rejected by audit_manuscript()
@@ -168,7 +173,9 @@ test_that("audit_manuscript and stat_lint_dir reject symlink escapes and danglin
   saveRDS(lm(mpg ~ wt, data = mtcars), outside_rds)
   models_dir <- file.path(tmp, "models")
   dir.create(models_dir)
-  file.symlink(outside_rds, file.path(models_dir, "escaped.rds"))
+  if (!isTRUE(suppressWarnings(file.symlink(outside_rds, file.path(models_dir, "escaped.rds"))))) {
+    skip("Symlinks unavailable on this OS")
+  }
   expect_error(
     audit_manuscript_text("b = -5.34", models = models_dir),
     "symlink traversal"
@@ -180,7 +187,9 @@ test_that("audit_manuscript and stat_lint_dir reject symlink escapes and danglin
   scan_dir <- file.path(tmp, "scan")
   dir.create(scan_dir)
   writeLines(c("set.seed(1)", "x <- rnorm(10)"), file.path(scan_dir, "clean.R"))
-  file.symlink(outside_r, file.path(scan_dir, "escaped.R"))
+  if (!isTRUE(suppressWarnings(file.symlink(outside_r, file.path(scan_dir, "escaped.R"))))) {
+    skip("Symlinks unavailable on this OS")
+  }
   lres <- stat_lint_dir(scan_dir)
   expect_equal(lres$summary$n_files, 1L)
   expect_equal(nrow(lres$findings), 0L)

@@ -46,7 +46,7 @@ Following an independent adversarial red-team review of `statci` v0.4.0, all 20 
 - **Mitigation in v0.2.0 (`R/security.R`, `R/github-action.R`):**
   - Strict allowlist validators (`validate_r_version()`, `validate_branch_names()`, `validate_safe_rel_path()`, `validate_contained_dest()`, `safe_yaml_scalar()`) reject control characters, newlines, quotes, backslashes, `..` traversal segments, absolute/home paths, and shell/YAML/R metacharacters.
   - **Zero untrusted string interpolation into `run:` blocks:** All validated parameters are passed via workflow `env:` variables (`STATCI_LINT_PATHS`, `STATCI_MANUSCRIPT`, `STATCI_MODELS_PATH`, `STATCI_REPORT_DIR`, `STATCI_FAIL_ON`, `STATCI_AUDIT_SCRIPT`) and read via `Sys.getenv()` inside static R code (or `Rscript --vanilla "$STATCI_AUDIT_SCRIPT"`).
-  - Workflow actions are pinned to explicit patch versions (`actions/checkout@v4.2.2` with `persist-credentials: false`, `r-lib/actions/setup-r@v2.11.2`, `r-lib/actions/setup-r-dependencies@v2.11.2`, `actions/upload-artifact@v4.6.2`) under minimal `permissions: contents: read`.
+  - Workflow actions use vetted major tags (`actions/checkout@v4` with `persist-credentials: false`, `r-lib/actions/setup-r@v2`, `r-lib/actions/setup-r-dependencies@v2`, `actions/upload-artifact@v4`) under minimal `permissions: contents: read`.
 
 ### 2. HTML Report XSS & Markdown HTML Injection (`render_statci_report()`)
 - **Audit scope:** Malicious filenames, rule IDs, lint messages, code snippets, model names, term names, sensitivity details, and report titles containing `<script>`, `<img onerror=...>`, `<svg onload=...>`, or control characters.

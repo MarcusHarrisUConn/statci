@@ -52,6 +52,7 @@ unquote_diff_path <- function(raw_path) {
 #'   1-based line numbers in the target file.
 #' @noRd
 parse_unified_diff <- function(diff_lines) {
+  diff_lines <- sub("\r$", "", diff_lines)
   changed <- list()
   cur_file <- NULL
   cur_new_line <- NA_integer_
@@ -270,6 +271,9 @@ stat_lint_diff <- function(path = ".",
       rlang::abort(paste0("`git diff` failed: ", paste(diff_out, collapse = "\n")))
     }
     diff_lines <- diff_out
+    if (length(diff_lines) > 0L) {
+      Encoding(diff_lines) <- "UTF-8"
+    }
   }
 
   changed_map <- parse_unified_diff(diff_lines)
