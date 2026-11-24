@@ -280,6 +280,7 @@ apply_severity_overrides <- function(lint_res, overrides) {
 #' @param parallel_rng Optional `"statci_parallel_rng"` object to include.
 #' @param sensitivity Optional `"statci_sensitivity"` object to include.
 #' @param power_curve Optional `"statci_power_curve"` object to include.
+#' @param multiverse Optional `"statci_multiverse"` object to include.
 #' @param enforce_gate Logical; if `TRUE`, calls [statci_check_gate()] using
 #'   `config$gate$fail_on`. Default `FALSE`.
 #'
@@ -301,6 +302,7 @@ statci_audit_project <- function(path = ".",
                                  parallel_rng = NULL,
                                  sensitivity = NULL,
                                  power_curve = NULL,
+                                 multiverse = NULL,
                                  enforce_gate = FALSE) {
   validate_existing_dir(path, arg = "path")
   root_norm <- normalizePath(path, winslash = "/", mustWork = TRUE)
@@ -367,6 +369,7 @@ statci_audit_project <- function(path = ".",
     manuscript = ms_res,
     sensitivity = sensitivity,
     power_curve = power_curve,
+    multiverse = multiverse,
     title = cfg$report$title,
     metadata = list(project_dir = basename(root_norm))
   )

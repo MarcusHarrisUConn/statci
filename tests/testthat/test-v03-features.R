@@ -4,7 +4,7 @@
 test_that("17 built-in AST rules include Rules 15-17 with true positives and zero false positives", {
   reset_stat_rules()
   rules <- list_stat_rules()
-  expect_equal(nrow(rules), 17L)
+  expect_gte(nrow(rules), 20L)
   expect_true(all(c(
     "silent_na_coercion",
     "stepwise_selection_unvalidated",
@@ -135,7 +135,7 @@ test_that("statci_audit_project orchestrates linting, severity overrides, manusc
   dir.create(file.path(tmp, "models"), recursive = TRUE)
   on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
 
-  writeLines(c("set.seed(1)", "x <- rnorm(20)", "m <- mean(x, na.rm = TRUE)"), file.path(tmp, "R", "ok.R"))
+  writeLines(c("set.seed(1)", "x <- rnorm(20)", "m <- mean(x)"), file.path(tmp, "R", "ok.R"))
   fit <- lm(mpg ~ wt, data = mtcars)
   saveRDS(list(primary = fit), file.path(tmp, "models", "fits.rds"))
   writeLines(c(
@@ -305,7 +305,7 @@ test_that("export_statci_sarif emits valid SARIF 2.1.0 JSON and integrates with 
   on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
 
   r_file <- file.path(tmp, "bad.R")
-  writeLines(c("x <- rnorm(10)", "m <- mean(x, na.rm = T)"), r_file)
+  writeLines(c("x <- rnorm(10)", "tt <- t.test(x, var.equal = F)"), r_file)
   lres <- stat_lint(r_file)
 
   sarif_path <- file.path(tmp, "statci.sarif")
@@ -317,7 +317,7 @@ test_that("export_statci_sarif emits valid SARIF 2.1.0 JSON and integrates with 
   expect_match(parsed[["$schema"]], "sarif-2.1.0.json")
   run1 <- parsed$runs[[1L]]
   expect_equal(run1$tool$driver$name, "statci")
-  expect_gte(length(run1$tool$driver$rules), 17L)
+  expect_gte(length(run1$tool$driver$rules), 20L)
   expect_equal(length(run1$results), 2L)
   expect_equal(run1$results[[1L]]$locations[[1L]]$physicalLocation$artifactLocation$uri, "bad.R")
   expect_equal(run1$results[[1L]]$locations[[1L]]$physicalLocation$region$startLine, 1L)

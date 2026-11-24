@@ -29,10 +29,11 @@ navbar:
 home:
   title: "statci: Statistical CI/CD, Calibration Fuzzing & Manuscript Auditing"
   description: >
-    Automated statistical CI/CD for R: 17-rule AST methodological linter with
-    SARIF 2.1.0 export, Simulation-Based Calibration (SBC) and power-curve
-    fuzzing, parallel RNG invariance testing, Quarto/RMarkdown/LaTeX manuscript
-    auditing, and adversarial robustness suites.
+    Automated statistical CI/CD for R: 20-rule AST methodological linter with
+    incremental Git-diff PR linting and SARIF 2.1.0 export, Simulation-Based
+    Calibration (SBC) and power-curve fuzzing, parallel RNG invariance testing,
+    Quarto/RMarkdown/LaTeX manuscript auditing, adversarial sensitivity, and
+    multiverse specification-curve robustness suites.
 
 articles:
   - title: "Core Workflows"
@@ -41,18 +42,20 @@ articles:
       - getting-started
       - calibration-and-robustness
       - manuscript-auditing
+      - multiverse-and-pr-diffs
       - github-actions-ci
 
 reference:
-  - title: "AST Statistical Linter & SARIF Export"
+  - title: "AST Statistical Linter, PR Diff Linting & SARIF Export"
     desc: >
       Parse R scripts and Quarto/RMarkdown chunks into XML abstract syntax trees,
-      evaluate 17 built-in statistical lint rules or custom rules, and export
-      SARIF 2.1.0 JSON for GitHub Code Scanning.
+      evaluate 20 built-in statistical lint rules or custom rules, incrementally
+      lint Git pull-request diffs, and export SARIF 2.1.0 JSON for GitHub Code Scanning.
     contents:
       - stat_lint
       - stat_lint_text
       - stat_lint_dir
+      - stat_lint_diff
       - list_stat_rules
       - new_stat_rule
       - register_stat_rule
@@ -82,14 +85,18 @@ reference:
       - audit_manuscript
       - audit_manuscript_text
 
-  - title: "Adversarial Sensitivity & Robustness Battery"
+  - title: "Adversarial Sensitivity & Multiverse Specification Curves"
     desc: >
       Stress-test fitted modeling pipelines under outlier winsorization,
       leave-one-cluster-out (LOCO) / leave-one-out influence, missingness
-      contrasts, and nonparametric bootstrap resampling.
+      contrasts, nonparametric bootstrap resampling, and full Cartesian
+      multiverse specification curves.
     contents:
       - audit_sensitivity
       - plot.statci_sensitivity
+      - audit_multiverse
+      - summary.statci_multiverse
+      - plot.statci_multiverse
 
   - title: "Project Orchestration, Reports & GitHub Actions"
     desc: >

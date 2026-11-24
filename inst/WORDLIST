@@ -5,15 +5,18 @@ AST
 biomet
 Clopper
 CMRG
+combinatorial
 DGP
 doi
 dotchart
 et
 fuzzers
+gapped
 gg
 hardcoded
 Hardcoded
 L'Ecuyer
+lintable
 linter
 Linter
 linters
@@ -22,6 +25,7 @@ MCAR
 MCSE
 mitigations
 natively
+onboarding
 positionally
 Pre
 ReDoS

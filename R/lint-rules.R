@@ -225,6 +225,9 @@ default_rule_ids <- function() {
     "silent_listwise_mismatch",
     "silent_factor_drop",
     "silent_na_coercion",
+    "unverified_merge_cardinality",
+    "missing_drop_false_matrix",
+    "implicit_na_rm_masking",
     "equality_on_float",
     "unadjusted_multiple_testing",
     "stepwise_selection_unvalidated",
@@ -1495,6 +1498,153 @@ check_in_sample_prediction_eval <- function(ctx) {
   findings
 }
 
+# 18. unverified_merge_cardinality
+check_unverified_merge_cardinality <- function(ctx) {
+  join_fns <- c("merge", "left_join", "inner_join", "full_join", "right_join")
+  verify_fns <- c("nrow", "NROW", "dim", "stopifnot", "duplicated", "anyDuplicated", "assert_that")
+
+  # Collect post-merge verification calls (with line numbers and referenced symbols)
+  verifies <- list()
+  for (u in ctx$units) {
+    for (vc in ast_calls(u$xml, verify_fns)) {
+      verifies[[length(verifies) + 1L]] <- list(
+        line = ast_line(vc, u$line_offset),
+        symbols = ast_symbols(vc)
+      )
+    }
+  }
+
+  findings <- list()
+  for (u in ctx$units) {
+    for (nd in ast_calls(u$xml, join_fns)) {
+      fn <- ast_call_name(nd)
+      args <- ast_call_args(nd)
+      arg_names <- vapply(args, function(a) a$name %||% "", character(1L))
+      # dplyr >= 1.1 explicit relationship = "one-to-one" / "many-to-one" / etc.
+      if ("relationship" %in% arg_names) next
+
+      ln <- ast_line(nd, u$line_offset)
+      assigned <- ast_assigned_var(nd)
+      assigned_root <- if (!is.na(assigned)) sub("(\\$|\\[).*", "", assigned) else NA_character_
+
+      # Check whether a later line verifies row count / uniqueness on the merged object
+      is_verified <- FALSE
+      for (v in verifies) {
+        if (v$line >= ln) {
+          if (is.na(assigned_root) || assigned_root %in% v$symbols) {
+            is_verified <- TRUE
+            break
+          }
+        }
+      }
+      if (is_verified) next
+
+      findings[[length(findings) + 1L]] <- make_finding(
+        ctx, ln, ast_col(nd),
+        paste0(
+          "`", fn, "()` called without `relationship =` or a post-merge row-count assertion ",
+          "(`nrow()` / `stopifnot()`); unintended duplicate keys can silently multiply rows."
+        )
+      )
+    }
+  }
+  findings
+}
+
+# 19. missing_drop_false_matrix
+check_missing_drop_false_matrix <- function(ctx) {
+  findings <- list()
+  for (u in ctx$units) {
+    # 2D subsetting expressions inside reusable function()/lambda definitions
+    sub_nodes <- xml2::xml_find_all(
+      u$xml,
+      ".//expr[OP-LEFT-BRACKET and OP-COMMA and ancestor::expr[FUNCTION or OP-LAMBDA]]"
+    )
+    for (nd in sub_nodes) {
+      # Skip LHS of assignment (e.g., X[, j] <- 0)
+      parent <- xml2::xml_parent(nd)
+      if (!inherits(parent, "xml_missing")) {
+        pch <- xml2::xml_children(parent)
+        if (length(pch) == 3L &&
+            xml2::xml_name(pch[[2L]]) %in% c("LEFT_ASSIGN", "EQ_ASSIGN") &&
+            identical(xml2::xml_path(pch[[1L]]), xml2::xml_path(nd))) {
+          next
+        }
+      }
+
+      ch <- xml2::xml_children(nd)
+      ch_names <- xml2::xml_name(ch)
+
+      # Safe if `drop =` argument is present
+      sub_syms <- xml2::xml_text(ch[ch_names == "SYMBOL_SUB"])
+      if ("drop" %in% sub_syms) next
+
+      # Inspect token immediately after the first comma (column index)
+      comma_pos <- which(ch_names == "OP-COMMA")[1L]
+      if (is.na(comma_pos) || comma_pos >= length(ch)) next
+      col_node <- ch[[comma_pos + 1L]]
+      col_name <- ch_names[comma_pos + 1L]
+      # Empty column index (e.g. df[idx, ]) does not collapse columns to a vector
+      if (col_name %in% c("OP-RIGHT-BRACKET", "OP-COMMA")) next
+
+      # Skip explicit multi-column constant slices like 1:3 or c("a", "b")
+      if (col_name == "expr") {
+        if (!inherits(xml2::xml_find_first(col_node, "./OP-COLON"), "xml_missing")) next
+        c_calls <- ast_calls(col_node, "c")
+        if (length(c_calls) >= 1L && length(ast_call_args(c_calls[[1L]])) >= 2L) next
+      }
+
+      ln <- ast_line(nd, u$line_offset)
+      findings[[length(findings) + 1L]] <- make_finding(
+        ctx, ln, ast_col(nd),
+        paste0(
+          "2D column subsetting `", xml2::xml_text(nd), "` inside a function omits `drop = FALSE`; ",
+          "selecting a single column silently collapses matrices/data frames into a vector."
+        )
+      )
+    }
+  }
+  findings
+}
+
+# 20. implicit_na_rm_masking
+check_implicit_na_rm_masking <- function(ctx) {
+  agg_fns <- c("mean", "sd", "var", "median", "sum")
+  na_guard_fns <- c(
+    "is.na", "anyNA", "complete.cases", "na.omit", "na.exclude",
+    "drop_na", "na.fail", "n_miss", "miss_var_summary"
+  )
+
+  # If any missingness inspection or filtering exists in the file/document, pass cleanly
+  for (u in ctx$units) {
+    if (any(ast_fn_calls_in(u$xml) %in% na_guard_fns)) {
+      return(list())
+    }
+  }
+
+  findings <- list()
+  for (u in ctx$units) {
+    for (nd in ast_calls(u$xml, agg_fns)) {
+      args <- ast_call_args(nd)
+      narm_arg <- Filter(function(a) identical(a$name, "na.rm"), args)
+      if (length(narm_arg) == 0L) next
+      val_txt <- trimws(narm_arg[[1L]]$text)
+      if (!(val_txt %in% c("TRUE", "T"))) next
+
+      fn <- ast_call_name(nd)
+      ln <- ast_line(nd, u$line_offset)
+      findings[[length(findings) + 1L]] <- make_finding(
+        ctx, ln, ast_col(nd),
+        paste0(
+          "`", fn, "(..., na.rm = ", val_txt, ")` silently discards missing values with no ",
+          "`is.na()` / `anyNA()` / `complete.cases()` missingness check or report in scope."
+        )
+      )
+    }
+  }
+  findings
+}
+
 build_default_rules <- function() {
   list(
     new_stat_rule(
@@ -1577,6 +1727,33 @@ build_default_rules <- function() {
       description = "Coercing character vectors or string-parsed tokens with as.numeric()/as.integer() silently produces NAs for unparseable values.",
       recommendation = "Verify coerced outputs with anyNA() or is.na() before downstream modeling.",
       check = check_silent_na_coercion
+    ),
+    new_stat_rule(
+      id = "unverified_merge_cardinality",
+      title = "Unverified join/merge cardinality without row-count check",
+      severity = "warning",
+      category = "modeling",
+      description = "Calling merge() or dplyr joins without specifying `relationship =` or checking nrow() risks silent many-to-many row duplication.",
+      recommendation = "Pass relationship = \"one-to-one\" / \"many-to-one\" (dplyr) or assert stopifnot(nrow(merged) == nrow(lhs)).",
+      check = check_unverified_merge_cardinality
+    ),
+    new_stat_rule(
+      id = "missing_drop_false_matrix",
+      title = "2D column subsetting inside function without drop = FALSE",
+      severity = "warning",
+      category = "modeling",
+      description = "Subsetting matrix or data.frame columns inside reusable functions without drop = FALSE silently collapses 1-column selections into vectors.",
+      recommendation = "Pass drop = FALSE explicitly (e.g., X[, j, drop = FALSE]).",
+      check = check_missing_drop_false_matrix
+    ),
+    new_stat_rule(
+      id = "implicit_na_rm_masking",
+      title = "Summary metric uses na.rm = TRUE without missingness audit",
+      severity = "warning",
+      category = "modeling",
+      description = "Discarding missing values silently via na.rm = TRUE without checking is.na()/anyNA() can mask data corruption or heavy attrition.",
+      recommendation = "Audit or assert missingness explicitly (e.g., sum(is.na(x)) or anyNA(x)) before applying na.rm = TRUE.",
+      check = check_implicit_na_rm_masking
     ),
     new_stat_rule(
       id = "equality_on_float",

@@ -183,3 +183,19 @@ is_safe_contained_file <- function(file_path, root_dir) {
   prefix <- paste0(sub("/+$", "", root_real), "/")
   startsWith(file_real, prefix)
 }
+
+#' Strictly validate a Git ref name (blocking option injection and shell chars)
+#' @noRd
+validate_git_ref <- function(ref, arg = "base_ref") {
+  assert_clean_scalar_string(ref, arg)
+  if (startsWith(ref, "-")) {
+    rlang::abort(paste0("`", arg, "` must not start with `-` (option injection blocked): `", ref, "`."))
+  }
+  if (grepl("\\.\\.|//|@\\{|\\.lock$", ref)) {
+    rlang::abort(paste0("`", arg, "` contains disallowed Git ref sequence: `", ref, "`."))
+  }
+  if (!grepl("^[A-Za-z0-9][A-Za-z0-9._/~^-]{0,127}$", ref)) {
+    rlang::abort(paste0("Invalid Git ref name for `", arg, "`: `", ref, "`."))
+  }
+  ref
+}

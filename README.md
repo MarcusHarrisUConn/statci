@@ -1,6 +1,6 @@
 # statci
 
-> **Automated statistical CI/CD for R:** AST-based methodological linting with SARIF 2.1.0 export, Simulation-Based Calibration (SBC) & power-curve fuzzing, parallel RNG invariance testing, Quarto/RMarkdown/LaTeX manuscript auditing, and adversarial robustness suites.
+> **Automated statistical CI/CD for R:** 20-rule AST methodological linter with incremental Git-diff PR linting & SARIF 2.1.0 export, Simulation-Based Calibration (SBC) & power-curve fuzzing, parallel RNG invariance testing, Quarto/RMarkdown/LaTeX manuscript auditing, adversarial sensitivity, and multiverse specification-curve robustness suites.
 
 **Documentation:** [https://marcusharrisphd.com/statci/](https://marcusharrisphd.com/statci/)
 
@@ -24,9 +24,9 @@ remotes::install_github("MarcusHarrisUConn/statci")
 
 ## Five Verification Pillars
 
-### 1. AST-Based Statistical Linter (`stat_lint()`, `stat_lint_dir()`, `export_statci_sarif()`)
+### 1. AST-Based Statistical Linter & Incremental PR Diff Linting (`stat_lint()`, `stat_lint_dir()`, `stat_lint_diff()`, `export_statci_sarif()`)
 
-Parses `.R`, `.qmd`, and `.Rmd` files into full XML abstract syntax trees (preserving exact original line numbers and cross-chunk scope in Quarto/RMarkdown documents) and evaluates **17 built-in methodological rules** plus user-registered custom rules (`new_stat_rule()`, `register_stat_rule()`):
+Parses `.R`, `.qmd`, and `.Rmd` files into full XML abstract syntax trees (preserving exact original line numbers and cross-chunk scope in Quarto/RMarkdown documents) and evaluates **20 built-in methodological rules** plus user-registered custom rules (`new_stat_rule()`, `register_stat_rule()`):
 
 | Rule ID | Severity | Hazard Detected |
 |---|---|---|
@@ -39,6 +39,9 @@ Parses `.R`, `.qmd`, and `.Rmd` files into full XML abstract syntax trees (prese
 | `silent_listwise_mismatch` | `warning` | Comparing models with differing variable sets via `anova()`/`AIC()`/`BIC()` on unharmonized data |
 | `silent_factor_drop` | `warning` | `as.numeric(factor_var)` level-code coercion or modeling `subset()`/`filter()` data without `droplevels()` |
 | `silent_na_coercion` | `warning` | Unchecked `as.numeric()`/`as.integer()` coercion of character/parsed strings without `anyNA()`/`is.na()` verification |
+| `unverified_merge_cardinality` | `warning` | `dplyr::*_join()` or `merge()` without `relationship =` or `nrow()` guards against silent many-to-many row duplication |
+| `missing_drop_false_matrix` | `warning` | 2D matrix/array subsetting (`X[, cols]`, `X[idx, ]`) missing `drop = FALSE`, silently collapsing 1-row/1-col subsets to vectors |
+| `implicit_na_rm_masking` | `info` | Unconditional `na.rm = TRUE` in summary statistics without nearby missingness inspection (`is.na()`, `anyNA()`, `complete.cases()`) |
 | `equality_on_float` | `warning` | Exact `==` / `!=` comparisons on floating-point literals or continuous statistics |
 | `unadjusted_multiple_testing` | `warning` | Repeated hypothesis tests inside loops/`lapply`/`map` without `p.adjust()` in scope |
 | `stepwise_selection_unvalidated` | `warning` | In-sample `step()` / `MASS::stepAIC()` / `regsubsets()` without cross-validation or holdout validation |
@@ -54,6 +57,9 @@ library(statci)
 # Lint a script, Quarto document, or project directory
 res <- stat_lint(system.file("examples", "flawed-analysis.R", package = "statci"))
 res
+
+# Incrementally lint only added/modified lines in a Git PR without legacy noise
+pr_res <- stat_lint_diff(path = ".", base_ref = "origin/main", head_ref = "HEAD")
 
 # Export SARIF 2.1.0 JSON for GitHub Code Scanning inline PR annotations
 sarif <- export_statci_sarif(res)
@@ -99,9 +105,9 @@ audit_manuscript(
 )
 ```
 
-### 4. Adversarial Sensitivity & Robustness Battery (`audit_sensitivity()`)
+### 4. Adversarial Sensitivity & Multiverse Specification Curves (`audit_sensitivity()`, `audit_multiverse()`)
 
-Stress-tests fitted pipelines across tail winsorization, leave-one-cluster-out (LOCO) / leave-one-out jackknife influence, missingness + imputation contrasts, and cluster/observation bootstrap stability:
+Stress-tests fitted pipelines across tail winsorization, leave-one-cluster-out (LOCO) / leave-one-out jackknife influence, missingness + imputation contrasts, cluster/observation bootstrap stability, and full Cartesian multiverse specification curves with per-fork variance decomposition (`eta_squared`) and two-panel `plot()` visualizations:
 
 ```r
 sens <- audit_sensitivity(
@@ -110,6 +116,23 @@ sens <- audit_sensitivity(
   n_boot = 100L,
   seed = 42L
 )
+
+mv <- audit_multiverse(
+  data = mtcars,
+  decisions = list(
+    outliers = c("none", "winsor_5pct"),
+    covariates = c("bivariate", "adjusted")
+  ),
+  fit_fn = function(d, spec) {
+    if (spec$outliers == "winsor_5pct") {
+      qs <- quantile(d$mpg, c(0.05, 0.95))
+      d$mpg <- pmin(pmax(d$mpg, qs[1]), qs[2])
+    }
+    if (spec$covariates == "bivariate") lm(mpg ~ wt, data = d) else lm(mpg ~ wt + hp, data = d)
+  },
+  param = "wt"
+)
+plot(mv)
 ```
 
 ### 5. Declarative Config, Unified Reports & GitHub Actions (`read_statci_config()`, `statci_audit_project()`, `use_statci_github_action()`)
@@ -124,9 +147,10 @@ use_statci_github_action(lint_paths = c("R", "analysis"), upload_sarif = TRUE)
 
 ## Documentation & Guides
 
-- `vignette("getting-started", package = "statci")` — AST linting, 17 rules, custom rules, and reports.
+- `vignette("getting-started", package = "statci")` — AST linting, 20 rules, custom rules, and reports.
 - `vignette("calibration-and-robustness", package = "statci")` — Estimator calibration, SBC, power curves, parallel RNG invariance, and adversarial sensitivity.
 - `vignette("manuscript-auditing", package = "statci")` — Auditing Quarto/RMarkdown/LaTeX prose, tables, APA tests, and internal arithmetic.
+- `vignette("multiverse-and-pr-diffs", package = "statci")` — Multiverse specification curves (`audit_multiverse()`), incremental PR diff linting (`stat_lint_diff()`), and data-integrity AST rules.
 - `vignette("github-actions-ci", package = "statci")` — `.statci.yml` config, `statci_audit_project()`, SARIF 2.1.0, and GitHub Actions.
 - See [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md) for architecture and security details.
 

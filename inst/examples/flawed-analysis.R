@@ -16,3 +16,8 @@ in_sample_mse <- mean((train$y - pred_in)^2)
 
 # Unadjusted multiple hypothesis testing + mutable F literal
 pvals <- sapply(1:8, function(k) t.test(rnorm(20), rnorm(20), var.equal = F)$p.value)
+
+# Unverified merge cardinality + missing drop = FALSE in helper + implicit na.rm masking
+merged_df <- merge(df, lookup, by = "school")
+extract_col <- function(mat, j) mat[, j]
+avg_y <- mean(merged_df$y, na.rm = TRUE)

@@ -1,0 +1,238 @@
+---
+title: "Multiverse Specification Curves, Incremental PR Diff Linting & New AST Rules"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Multiverse Specification Curves, Incremental PR Diff Linting & New AST Rules}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+Real-world statistical repositories face two recurring engineering challenges:
+
+1. **Analytical fragility ("garden of forking paths")**: A focal effect may depend heavily on seemingly arbitrary researcher degrees of freedom—outlier trimming rules, covariate sets, missing-data handling, or predictor transformations.
+2. **Legacy repository adoption**: Adding a strict 20-rule statistical linter to a multi-year research repository can flood pull requests with hundreds of untouched legacy findings unless linting is scoped incrementally to changed lines.
+
+This vignette demonstrates how `statci` solves both problems with `audit_multiverse()`, `stat_lint_diff()`, and its 20 built-in AST statistical lint rules.
+
+```{r setup}
+library(statci)
+```
+
+## 1. Multiverse Specification-Curve Auditing (`audit_multiverse()`)
+
+`audit_multiverse()` evaluates a user-supplied modeling pipeline across the full Cartesian grid of analytical decision forks, returning specification-level estimates, confidence intervals, p-values, sign consistency, median and interquartile range (IQR), and a per-fork variance decomposition (`eta_squared`) that pinpoints which decision fork drives estimate dispersion.
+
+### A Robust Multiverse
+
+First, simulate a clean dataset where `x` has a strong, genuine linear relationship with `y` regardless of reasonable analytical choices:
+
+```{r multiverse-robust}
+set.seed(2026)
+n <- 120L
+study_df <- data.frame(
+  x = rnorm(n),
+  age = rnorm(n),
+  ses = rnorm(n)
+)
+study_df$y <- 1.5 + 0.85 * study_df$x + 0.25 * study_df$age - 0.15 * study_df$ses + rnorm(n, sd = 0.6)
+
+decisions <- list(
+  outliers = c("none", "winsor_5pct"),
+  covariates = c("bivariate", "age_only", "age_and_ses"),
+  transform = c("raw", "centered")
+)
+
+fit_spec <- function(d, spec) {
+  if (spec$outliers == "winsor_5pct") {
+    qs <- stats::quantile(d$y, c(0.05, 0.95))
+    d$y <- pmin(pmax(d$y, qs[1L]), qs[2L])
+  }
+  if (spec$transform == "centered") {
+    d$x <- d$x - mean(d$x)
+  }
+  fml <- switch(
+    spec$covariates,
+    bivariate = y ~ x,
+    age_only = y ~ x + age,
+    age_and_ses = y ~ x + age + ses
+  )
+  stats::lm(fml, data = d)
+}
+
+mv_robust <- audit_multiverse(
+  data = study_df,
+  decisions = decisions,
+  fit_fn = fit_spec,
+  param = "x"
+)
+
+summary(mv_robust)
+```
+
+Every specification agrees on direction (`sign_consistency = 100%`) and statistical significance (`p <= 0.05` across all 12 specifications), with tight IQR dispersion. We can visualize the sorted specification curve and its underlying decision matrix directly via `plot()`:
+
+```{r multiverse-plot-robust, fig.alt = "Two-panel specification curve showing stable positive point estimates with 95 percent confidence intervals across all 12 analytical specifications."}
+plot(mv_robust)
+```
+
+### Catching Analytical Fragility and Pinpointing Its Driver
+
+Now introduce a single extreme leverage outlier into a dataset whose true underlying slope is negative. Without winsorization, OLS flips sign; with 5% winsorization, the true negative slope is recovered:
+
+```{r multiverse-fragile}
+fragile_df <- study_df
+fragile_df$y <- -0.40 * fragile_df$x + 0.20 * fragile_df$age + rnorm(n, sd = 0.35)
+fragile_df$x[1L] <- 15
+fragile_df$y[1L] <- 28
+
+mv_fragile <- audit_multiverse(
+  data = fragile_df,
+  decisions = list(
+    outliers = c("keep_all", "winsor_5pct"),
+    covariates = c("bivariate", "age_only", "age_and_ses")
+  ),
+  fit_fn = function(d, spec) {
+    if (spec$outliers == "winsor_5pct") {
+      qx <- stats::quantile(d$x, c(0.05, 0.95))
+      qy <- stats::quantile(d$y, c(0.05, 0.95))
+      d$x <- pmin(pmax(d$x, qx[1L]), qx[2L])
+      d$y <- pmin(pmax(d$y, qy[1L]), qy[2L])
+    }
+    fml <- switch(
+      spec$covariates,
+      bivariate = y ~ x,
+      age_only = y ~ x + age,
+      age_and_ses = y ~ x + age + ses
+    )
+    stats::lm(fml, data = d)
+  },
+  param = "x"
+)
+
+summary(mv_fragile)
+```
+
+`audit_multiverse()` automatically flags `status = "fail"`, reports `sign_consistency = 50%`, and ranks `outliers` as the top variance driver (`eta_squared` near 100%).
+
+```{r multiverse-plot-fragile, fig.alt = "Two-panel specification curve showing sign reversal between keep_all and winsor_5pct outlier specifications."}
+plot(mv_fragile)
+```
+
+You can also extract the full specification table with `as_tibble()` and embed `multiverse = mv_robust` directly into `statci_report()` alongside lint, calibration, manuscript, and sensitivity checks:
+
+```{r multiverse-report}
+head(as_tibble(mv_robust)[, c("spec_id", "outliers", "covariates", "estimate", "p_value", "significant")])
+
+rep <- statci_report(multiverse = mv_robust, title = "Multiverse Verification Audit")
+rep
+```
+
+## 2. Incremental Git-Diff Pull Request Linting (`stat_lint_diff()`)
+
+When onboarding `statci` onto an existing repository with untouched legacy scripts, `stat_lint_diff()` runs full-file AST analysis on each modified `.R`, `.qmd`, or `.Rmd` file (so cross-line context like an earlier `set.seed()` is preserved) and reports **only findings that land on added or modified lines**.
+
+### Offline Usage with `diff_text`
+
+In CI pipelines or air-gapped environments, you can pass a unified diff string directly via `diff_text`:
+
+```{r diff-offline}
+tmp_dir <- tempfile("statci_vignette_diff_")
+dir.create(tmp_dir)
+
+legacy_path <- file.path(tmp_dir, "legacy-pipeline.R")
+writeLines(c(
+  "legacy_draw <- rnorm(100)",          # Line 1: legacy unseeded call (untouched)
+  "set.seed(2026)",                     # Line 2: seed for new work
+  "fresh_draw <- rnorm(50)",            # Line 3: safe (seeded above)
+  "bad_flag <- mean(fresh_draw) == 0.5" # Line 4: newly added float equality
+), legacy_path)
+
+pr_diff <- paste(
+  "--- a/legacy-pipeline.R",
+  "+++ b/legacy-pipeline.R",
+  "@@ -2,0 +3,2 @@",
+  "+fresh_draw <- rnorm(50)",
+  "+bad_flag <- mean(fresh_draw) == 0.5",
+  sep = "\n"
+)
+
+diff_res <- stat_lint_diff(path = tmp_dir, diff_text = pr_diff)
+diff_res
+diff_res$diff_meta$n_suppressed_untouched
+```
+
+Notice two crucial properties:
+
+- Line 1 (`legacy_draw <- rnorm(100)`) was untouched by the PR, so it is suppressed (`n_suppressed_untouched = 1`) rather than blocking the PR.
+- Line 3 (`fresh_draw <- rnorm(50)`) is NOT falsely flagged as unseeded because `stat_lint_diff()` parses the full file AST and sees `set.seed(2026)` on line 2.
+- Line 4 (`bad_flag <- mean(fresh_draw) == 0.5`) is caught as `equality_on_float`.
+
+### Running Against a Git Repository (`base_ref`, `head_ref`, `staged`)
+
+When `diff_text = NULL`, `stat_lint_diff()` invokes read-only `git diff` after strictly validating `base_ref`/`head_ref` against option injection and confining all diff paths inside `path`:
+
+```r
+# Working-tree changes against HEAD
+stat_lint_diff(path = ".", base_ref = "HEAD")
+
+# Staged changes prior to commit
+stat_lint_diff(path = ".", staged = TRUE)
+
+# Pull-request diff between base branch and HEAD in GitHub Actions
+stat_lint_diff(path = ".", base_ref = "origin/main", head_ref = "HEAD")
+```
+
+```{r diff-cleanup, include = FALSE}
+unlink(tmp_dir, recursive = TRUE)
+```
+
+## 3. Silent Data-Integrity AST Rules (20 Built-In Rules)
+
+`statci` ships **20 built-in AST lint rules**. Three high-impact data-integrity rules catch silent statistical bugs that never raise R errors:
+
+1. **`unverified_merge_cardinality`**: Flags `dplyr::left_join()`, `inner_join()`, `full_join()`, `right_join()`, and base `merge()` calls that neither declare `relationship = ...` nor verify `nrow()` before/after joining, protecting against silent many-to-many row duplication that inflates sample sizes and shrinks standard errors.
+2. **`missing_drop_false_matrix`**: Flags 2D matrix/array subsetting such as `X[, cols]` or `X[idx, ]` lacking `drop = FALSE`, which silently collapses 1-row or 1-column subsets to atomic vectors and breaks downstream matrix algebra (`%*%`, `solve()`, `crossprod()`).
+3. **`implicit_na_rm_masking`**: Flags unconditional `na.rm = TRUE` inside statistical summaries (`mean()`, `sd()`, `var()`, `sum()`, `median()`, `quantile()`, `min()`, `max()`) without any nearby missingness inspection (`is.na()`, `anyNA()`, `complete.cases()`, `na.omit()`, `drop_na()`).
+
+```{r new-rules-demo}
+subtle_code <- '
+set.seed(2026)
+joined <- merge(patients, visits, by = "id")
+X_sub <- design_mat[, selected_cols]
+avg_score <- mean(joined$score, na.rm = TRUE)
+'
+
+stat_lint_text(
+  subtle_code,
+  rules = c(
+    "unverified_merge_cardinality",
+    "missing_drop_false_matrix",
+    "implicit_na_rm_masking"
+  )
+)
+```
+
+Once you explicitly guard join cardinality, preserve matrix dimensions with `drop = FALSE`, and audit missingness before summarizing, all 20 built-in rules pass cleanly:
+
+```{r new-rules-clean}
+guarded_code <- '
+set.seed(2026)
+n_before <- nrow(patients)
+joined <- merge(patients, visits, by = "id")
+stopifnot(identical(nrow(joined), n_before))
+X_sub <- design_mat[, selected_cols, drop = FALSE]
+n_missing <- sum(is.na(joined$score))
+avg_score <- mean(joined$score, na.rm = TRUE)
+'
+
+stat_lint_text(guarded_code)
+```

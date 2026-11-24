@@ -12,6 +12,7 @@ statci_report(
   manuscript = NULL,
   sensitivity = NULL,
   power_curve = NULL,
+  multiverse = NULL,
   title = "statci Statistical CI/CD Audit Report",
   metadata = list()
 )
@@ -30,6 +31,8 @@ statci_report(
 \item{sensitivity}{Optional \code{"statci_sensitivity"} object.}
 
 \item{power_curve}{Optional \code{"statci_power_curve"} object.}
+
+\item{multiverse}{Optional \code{"statci_multiverse"} object.}
 
 \item{title}{Report title string.}
 

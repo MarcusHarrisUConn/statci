@@ -278,18 +278,21 @@ build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eva
       }
     }
   } else {
-    # Extract line number from parse error message if available
+    # Extract line and column numbers from parse error message if available
     err_line <- 1L
+    err_col <- 1L
     m <- regexec(":([0-9]+):([0-9]+):", parsed$error)
     caps <- regmatches(parsed$error, m)[[1L]]
-    if (length(caps) >= 2L) {
+    if (length(caps) >= 3L) {
       err_line <- suppressWarnings(as.integer(caps[2L]))
+      err_col <- suppressWarnings(as.integer(caps[3L]))
       if (is.na(err_line)) err_line <- 1L
+      if (is.na(err_col)) err_col <- 1L
     }
     fallback_lines <- c(fallback_lines, err_line)
     parse_errors[[1L]] <- list(
       line = err_line,
-      col = 1L,
+      col = err_col,
       chunk = NA_character_,
       message = paste0("R parse error: ", parsed$error)
     )
@@ -317,12 +320,6 @@ build_parse_context <- function(lines, file = "<text>", is_rmd = FALSE, skip_eva
 #' @noRd
 ast_line <- function(node, offset = 0L) {
   as.integer(xml2::xml_attr(node, "line1")) + as.integer(offset)
-}
-
-#' 1-based end line number of an XML AST node
-#' @noRd
-ast_line2 <- function(node, offset = 0L) {
-  as.integer(xml2::xml_attr(node, "line2")) + as.integer(offset)
 }
 
 #' 1-based column number of an XML AST node
@@ -365,14 +362,6 @@ ast_call_name <- function(call_node) {
   fn <- xml2::xml_find_first(call_node, "./expr[1]/SYMBOL_FUNCTION_CALL")
   if (inherits(fn, "xml_missing")) return(NA_character_)
   xml2::xml_text(fn)
-}
-
-#' Get package namespace prefix from a call `<expr>` node, or NA
-#' @noRd
-ast_call_pkg <- function(call_node) {
-  pkg <- xml2::xml_find_first(call_node, "./expr[1]/SYMBOL_PACKAGE")
-  if (inherits(pkg, "xml_missing")) return(NA_character_)
-  xml2::xml_text(pkg)
 }
 
 #' Parse top-level arguments of a call `<expr>` node

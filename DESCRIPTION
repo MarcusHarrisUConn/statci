@@ -1,19 +1,20 @@
 Package: statci
 Title: Statistical CI/CD, Calibration Fuzzing, and Manuscript Auditing
-Version: 0.3.0
+Version: 0.4.0
 Authors@R: 
     person("Marcus", "Harris", , "marcus.harris.uconn@gmail.com", role = c("aut", "cre", "cph"))
 Description: Provides automated continuous integration and verification tools for
-    statistical R pipelines and manuscripts. Includes an abstract syntax tree
-    (AST) statistical linter for R scripts and 'Quarto'/'RMarkdown' documents
-    with 'SARIF' 2.1.0 export, an estimator calibration and simulation-based
-    calibration (SBC; Talts et al., 2018 <doi:10.48550/arXiv.1804.06788>)
-    fuzzing harness with exact Clopper-Pearson bounds
-    <doi:10.1093/biomet/26.4.404>, power-curve and parallel RNG invariance
-    auditing, a manuscript-to-model consistency auditor for 'Quarto',
-    'RMarkdown', and 'LaTeX' prose and tables, an adversarial sensitivity
-    battery, project configuration orchestration, standalone HTML and Markdown
-    audit reports, and a 'GitHub Actions' workflow generator.
+    statistical R pipelines and manuscripts. Includes a 20-rule abstract syntax
+    tree (AST) statistical linter for R scripts and 'Quarto'/'RMarkdown'
+    documents with incremental Git-diff pull-request linting and 'SARIF' 2.1.0
+    export, an estimator calibration and simulation-based calibration (SBC;
+    Talts et al., 2018 <doi:10.48550/arXiv.1804.06788>) fuzzing harness with
+    exact Clopper-Pearson bounds <doi:10.1093/biomet/26.4.404>, power-curve and
+    parallel RNG invariance auditing, a manuscript-to-model consistency auditor
+    for 'Quarto', 'RMarkdown', and 'LaTeX' prose and tables, an adversarial
+    sensitivity and multiverse specification-curve robustness suite, project
+    configuration orchestration, standalone HTML and Markdown audit reports,
+    and a 'GitHub Actions' workflow generator.
 License: MIT + file LICENSE
 URL: https://marcusharrisphd.com/statci/, https://github.com/MarcusHarrisUConn/statci
 BugReports: https://github.com/MarcusHarrisUConn/statci/issues

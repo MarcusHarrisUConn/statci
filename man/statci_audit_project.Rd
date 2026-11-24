@@ -12,6 +12,7 @@ statci_audit_project(
   parallel_rng = NULL,
   sensitivity = NULL,
   power_curve = NULL,
+  multiverse = NULL,
   enforce_gate = FALSE
 )
 }
@@ -35,6 +36,8 @@ otherwise uses sensible defaults).
 \item{sensitivity}{Optional \code{"statci_sensitivity"} object to include.}
 
 \item{power_curve}{Optional \code{"statci_power_curve"} object to include.}
+
+\item{multiverse}{Optional \code{"statci_multiverse"} object to include.}
 
 \item{enforce_gate}{Logical; if \code{TRUE}, calls \code{\link[=statci_check_gate]{statci_check_gate()}} using
 \code{config$gate$fail_on}. Default \code{FALSE}.}

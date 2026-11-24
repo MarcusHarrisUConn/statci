@@ -16,6 +16,7 @@
 #' @param manuscript Optional `"statci_manuscript_audit"` object.
 #' @param sensitivity Optional `"statci_sensitivity"` object.
 #' @param power_curve Optional `"statci_power_curve"` object.
+#' @param multiverse Optional `"statci_multiverse"` object.
 #' @param title Report title string.
 #' @param metadata Optional named list of custom metadata (e.g., git SHA,
 #'   project name).
@@ -36,6 +37,7 @@ statci_report <- function(lint = NULL,
                           manuscript = NULL,
                           sensitivity = NULL,
                           power_curve = NULL,
+                          multiverse = NULL,
                           title = "statci Statistical CI/CD Audit Report",
                           metadata = list()) {
   validate_opt <- function(obj, cls, arg) {
@@ -50,6 +52,7 @@ statci_report <- function(lint = NULL,
   validate_opt(manuscript, "statci_manuscript_audit", "manuscript")
   validate_opt(sensitivity, "statci_sensitivity", "sensitivity")
   validate_opt(power_curve, "statci_power_curve", "power_curve")
+  validate_opt(multiverse, "statci_multiverse", "multiverse")
 
   sec_rows <- list()
   add_sec <- function(name, checks, passed, warnings, failures, status, detail) {
@@ -172,6 +175,23 @@ statci_report <- function(lint = NULL,
     )
   }
 
+  if (!is.null(multiverse)) {
+    ms <- multiverse$summary
+    add_sec(
+      "Multiverse Specification Curve",
+      checks = ms$n_specs,
+      passed = if (multiverse$status == "pass") ms$n_valid else 0L,
+      warnings = if (multiverse$status == "warn") 1L else 0L,
+      failures = if (multiverse$status == "fail") 1L else 0L,
+      status = multiverse$status,
+      detail = paste0(
+        ms$n_valid, "/", ms$n_specs, " specs; median = ", fmt_num(ms$median_est, 3L),
+        ", IQR = ", fmt_num(ms$iqr_est, 3L),
+        ", sign consistency = ", fmt_pct(ms$sign_consistency)
+      )
+    )
+  }
+
   sections <- if (length(sec_rows) > 0L) {
     tibble::as_tibble(do.call(rbind, sec_rows))
   } else {
@@ -205,7 +225,8 @@ statci_report <- function(lint = NULL,
         parallel_rng = parallel_rng,
         manuscript = manuscript,
         sensitivity = sensitivity,
-        power_curve = power_curve
+        power_curve = power_curve,
+        multiverse = multiverse
       ),
       metadata = meta,
       status = overall
@@ -472,22 +493,37 @@ build_markdown_report <- function(report, title) {
   if (!is.null(comp$manuscript)) {
     m <- comp$manuscript
     out <- c(out, "## 3. Manuscript-to-Code Consistency", "")
-    if (nrow(m$checks) == 0L) {
+    if (nrow(m$checks) == 0L && (is.null(m$internal_checks) || nrow(m$internal_checks) == 0L)) {
       out <- c(out, "No numerical statistical claims detected in manuscript prose.", "")
     } else {
-      c_df <- m$checks
-      tbl <- data.frame(
-        Line = c_df$line,
-        Model = c_df$model,
-        Term = ifelse(is.na(c_df$term), "\u2014", c_df$term),
-        Metric = c_df$metric,
-        Reported = paste(c_df$op, c_df$reported_raw),
-        Actual = fmt_num(c_df$actual, 4L),
-        Issue = c_df$issue_type,
-        Status = vapply(c_df$status, md_badge, character(1L)),
-        stringsAsFactors = FALSE
-      )
-      out <- c(out, df_to_md_table(tbl), "")
+      if (nrow(m$checks) > 0L) {
+        c_df <- m$checks
+        tbl <- data.frame(
+          Line = c_df$line,
+          Model = c_df$model,
+          Term = ifelse(is.na(c_df$term), "\u2014", c_df$term),
+          Metric = c_df$metric,
+          Reported = paste(c_df$op, c_df$reported_raw),
+          Actual = fmt_num(c_df$actual, 4L),
+          Issue = c_df$issue_type,
+          Status = vapply(c_df$status, md_badge, character(1L)),
+          stringsAsFactors = FALSE
+        )
+        out <- c(out, df_to_md_table(tbl), "")
+      }
+      if (!is.null(m$internal_checks) && nrow(m$internal_checks) > 0L) {
+        ic <- m$internal_checks
+        ic_tbl <- data.frame(
+          Line = ic$line,
+          Check = ic$check_type,
+          Reported = ic$reported_expr,
+          Expected = ic$expected_range,
+          Detail = ic$detail,
+          Status = vapply(ic$status, md_badge, character(1L)),
+          stringsAsFactors = FALSE
+        )
+        out <- c(out, "### Internal Arithmetic Checks", "", df_to_md_table(ic_tbl), "")
+      }
     }
   }
 
@@ -523,6 +559,35 @@ build_markdown_report <- function(report, title) {
       stringsAsFactors = FALSE
     )
     out <- c(out, "## 5. Power-Curve Audit", "", df_to_md_table(tbl), "")
+  }
+
+  if (!is.null(comp$multiverse)) {
+    mv <- comp$multiverse
+    ms <- mv$summary
+    out <- c(
+      out,
+      "## 6. Multiverse Specification Curve",
+      "",
+      paste0(
+        "- **Parameter:** `", ms$parameter, "` (", ms$n_valid, "/", ms$n_specs, " specs) | ",
+        "**Median:** ", fmt_num(ms$median_est, 4L), " | **IQR:** ", fmt_num(ms$iqr_est, 4L),
+        " | **Sign Consistency:** ", fmt_pct(ms$sign_consistency),
+        " | **Significant:** ", fmt_pct(ms$prop_significant)
+      ),
+      ""
+    )
+    if (nrow(mv$fork_sensitivity) > 0L) {
+      fk <- mv$fork_sensitivity
+      tbl <- data.frame(
+        Decision = fk$decision,
+        Levels = fk$n_levels,
+        `Median Range` = fmt_num(fk$median_range, 4L),
+        `Variance Explained` = fmt_pct(fk$eta_squared),
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      )
+      out <- c(out, df_to_md_table(tbl), "")
+    }
   }
 
   paste(out, collapse = "\n")
@@ -758,22 +823,42 @@ build_html_report <- function(report, title) {
   # 3. Manuscript section
   if (!is.null(comp$manuscript)) {
     m <- comp$manuscript
-    inner <- if (nrow(m$checks) == 0L) {
+    has_checks <- nrow(m$checks) > 0L
+    has_ic <- !is.null(m$internal_checks) && nrow(m$internal_checks) > 0L
+    inner <- if (!has_checks && !has_ic) {
       '<p class="muted">No numerical statistical claims detected in manuscript prose.</p>'
     } else {
-      c_df <- m$checks
-      tbl <- data.frame(
-        Line = c_df$line,
-        Model = c_df$model,
-        Term = ifelse(is.na(c_df$term), "\u2014", c_df$term),
-        Metric = c_df$metric,
-        Reported = paste(c_df$op, c_df$reported_raw),
-        Actual = fmt_num(c_df$actual, 4L),
-        Issue = paste0("<code>", html_esc(c_df$issue_type), "</code>"),
-        Status = vapply(c_df$status, html_pill, character(1L)),
-        stringsAsFactors = FALSE
-      )
-      df_to_html_table(tbl, raw_cols = c("Issue", "Status"))
+      parts <- character(0)
+      if (has_checks) {
+        c_df <- m$checks
+        tbl <- data.frame(
+          Line = c_df$line,
+          Model = c_df$model,
+          Term = ifelse(is.na(c_df$term), "\u2014", c_df$term),
+          Metric = c_df$metric,
+          Reported = paste(c_df$op, c_df$reported_raw),
+          Actual = fmt_num(c_df$actual, 4L),
+          Issue = paste0("<code>", html_esc(c_df$issue_type), "</code>"),
+          Status = vapply(c_df$status, html_pill, character(1L)),
+          stringsAsFactors = FALSE
+        )
+        parts <- c(parts, df_to_html_table(tbl, raw_cols = c("Issue", "Status")))
+      }
+      if (has_ic) {
+        ic <- m$internal_checks
+        ic_tbl <- data.frame(
+          Line = ic$line,
+          Check = paste0("<code>", html_esc(ic$check_type), "</code>"),
+          Reported = ic$reported_expr,
+          Expected = ic$expected_range,
+          Detail = ic$detail,
+          Status = vapply(ic$status, html_pill, character(1L)),
+          stringsAsFactors = FALSE
+        )
+        parts <- c(parts, "<h3>Internal Arithmetic Checks</h3>",
+                   df_to_html_table(ic_tbl, raw_cols = c("Check", "Status")))
+      }
+      paste(parts, collapse = "")
     }
     body_parts <- c(
       body_parts,
@@ -825,6 +910,33 @@ build_html_report <- function(report, title) {
     )
   }
 
+  # 6. Multiverse section
+  if (!is.null(comp$multiverse)) {
+    mv <- comp$multiverse
+    ms <- mv$summary
+    summary_p <- paste0(
+      '<p class="muted"><strong>Parameter:</strong> <code>', html_esc(ms$parameter), "</code> (",
+      ms$n_valid, "/", ms$n_specs, " specs) | <strong>Median:</strong> ", fmt_num(ms$median_est, 4L),
+      " | <strong>IQR:</strong> ", fmt_num(ms$iqr_est, 4L),
+      " | <strong>Sign Consistency:</strong> ", fmt_pct(ms$sign_consistency),
+      " | <strong>Significant:</strong> ", fmt_pct(ms$prop_significant), "</p>"
+    )
+    fk <- mv$fork_sensitivity
+    tbl <- data.frame(
+      Decision = fk$decision,
+      Levels = fk$n_levels,
+      `Median Range` = fmt_num(fk$median_range, 4L),
+      `Variance Explained` = fmt_pct(fk$eta_squared),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    body_parts <- c(
+      body_parts,
+      paste0("<section><h2>Multiverse Specification Curve ", html_pill(mv$status), "</h2>",
+             summary_p, df_to_html_table(tbl), "</section>")
+    )
+  }
+
   paste0(
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
@@ -861,7 +973,8 @@ build_json_report <- function(report, title) {
     manuscript = if (!is.null(report$components$manuscript)) report$components$manuscript$checks else NULL,
     manuscript_internal = if (!is.null(report$components$manuscript)) report$components$manuscript$internal_checks else NULL,
     sensitivity = if (!is.null(report$components$sensitivity)) report$components$sensitivity$results else NULL,
-    power_curve = if (!is.null(report$components$power_curve)) report$components$power_curve$curve else NULL
+    power_curve = if (!is.null(report$components$power_curve)) report$components$power_curve$curve else NULL,
+    multiverse = if (!is.null(report$components$multiverse)) report$components$multiverse$specifications else NULL
   )
   as.character(jsonlite::toJSON(payload, auto_unbox = TRUE, pretty = TRUE, na = "null"))
 }

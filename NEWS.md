@@ -1,3 +1,21 @@
+# statci 0.4.0
+
+## New Features
+- Expanded the built-in AST methodological linter to **20 zero-false-positive rules**, adding 3 high-signal data-integrity rules:
+  - `unverified_merge_cardinality`: flags `dplyr::*_join()` and base `merge()` calls lacking `relationship =` or `nrow()` guards against silent many-to-many row duplication.
+  - `missing_drop_false_matrix`: flags 2D matrix/array subsetting (`X[, cols]`, `X[idx, ]`) lacking `drop = FALSE` that silently collapses 1-row/1-column matrices into atomic vectors.
+  - `implicit_na_rm_masking`: flags unconditional `na.rm = TRUE` in statistical summaries without nearby missingness inspection (`is.na()`, `anyNA()`, `complete.cases()`, `na.omit()`, `drop_na()`).
+- Added **Git-diff-aware incremental pull-request linting (`stat_lint_diff()`)** with unified diff parsing (`diff_text` or safe read-only `git diff` across working tree, `--cached`, or two-ref ranges), strict Git ref option-injection validation (`validate_git_ref()`), strict path confinement, and full-file AST context filtering to changed lines only.
+- Added **Specification-Curve / Multiverse Robustness Auditing (`audit_multiverse()`)** evaluating modeling pipelines across the full Cartesian grid of analytical decision forks, returning specification-level estimates, CIs, p-values, sign consistency, median/IQR, per-fork variance decomposition (`eta_squared`), S3 `print()`, `summary()`, `as_tibble()`, two-panel `plot()` (faceted `ggplot2` with base-R fallback), and full integration into `statci_report()` and `statci_audit_project()`.
+- Added a fifth executable vignette (`vignettes/multiverse-and-pr-diffs.Rmd`) and updated `inst/guides/statci-guide.Rmd` and the `pkgdown` reference site.
+
+## Bug Fixes & Coverage Hardening
+- Conducted full `covr` branch audit driving line coverage from 89.45% to **93.18%** across 459 passing tests.
+- Fixed single-line `\begin{verbatim}...\end{verbatim}` handling in `audit_manuscript()` where a single-line verbatim block previously left verbatim state active for the rest of a `.tex` document.
+- Fixed `.R` syntax error column extraction in `build_parse_context()` to capture exact reported columns instead of defaulting to column 1.
+- Fixed missing HTML and Markdown rendering of `manuscript$internal_checks` in `render_statci_report()`.
+- Hardened `system2()` argument quoting (`shQuote()`) in `stat_lint_diff()` for repository paths containing spaces, and removed dead internal helpers.
+
 # statci 0.3.0
 
 ## New Features & Workflow Orchestration

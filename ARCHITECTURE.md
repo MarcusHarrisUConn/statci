@@ -12,12 +12,13 @@ statci/
 ├── ARCHITECTURE.md
 ├── R/
 │   ├── statci-package.R       # Package-level docs and shared imports
-│   ├── security.R             # Centralized HTML/MD escaping, path/symlink & GHA validators
+│   ├── security.R             # Centralized HTML/MD escaping, path/symlink, Git ref & GHA validators
 │   ├── utils.R                # Shared helpers, status algebra, formatting, RNG utils
 │   ├── config.R               # .statci.yml strict YAML config & statci_audit_project()
 │   ├── lint-parser.R          # .R / .qmd / .Rmd projection, XML AST construction, AST suppression parser
-│   ├── lint-rules.R           # Rule S3 constructor, registry, and 17 built-in AST rules
+│   ├── lint-rules.R           # Rule S3 constructor, registry, and 20 built-in AST rules
 │   ├── lint-engine.R          # stat_lint(), stat_lint_text(), stat_lint_dir(), S3 methods
+│   ├── lint-diff.R            # stat_lint_diff() unified diff parser & incremental PR linter
 │   ├── sarif.R                # export_statci_sarif() SARIF 2.1.0 JSON generator
 │   ├── audit-estimator.R      # audit_estimator() parameter recovery, coverage, Type-I, convergence
 │   ├── audit-sbc.R            # audit_sbc() Simulation-Based Calibration (Talts et al., 2018)
@@ -25,6 +26,7 @@ statci/
 │   ├── audit-parallel-rng.R   # check_parallel_rng() and statci_parallel_apply() L'Ecuyer streams
 │   ├── audit-manuscript.R     # audit_manuscript() prose/table/LaTeX parser & internal arithmetic
 │   ├── audit-sensitivity.R    # audit_sensitivity() winsorization, LOO/LOCO, missingness, bootstrap
+│   ├── audit-multiverse.R     # audit_multiverse() specification-curve grid, variance decomposition & plots
 │   ├── report.R               # statci_report(), statci_check_gate(), render_statci_report()
 │   └── github-action.R        # use_statci_github_action() hardened CI workflow generator
 ├── tests/testthat/            # Comprehensive edition-3 unit & integration tests
@@ -70,7 +72,7 @@ Authors can silence intentional exceptions using standard line comments:
 
 Rules are `statci_rule` S3 objects stored in a package registry environment (`.statci_rule_registry`). Users inspect rules via `list_stat_rules()`, register custom AST rules via `register_stat_rule(new_stat_rule(...))`, and filter rules per invocation via `rules` / `exclude_rules`.
 
-`statci` ships **14 built-in statistical & methodological lint rules**:
+`statci` ships **20 built-in statistical & methodological lint rules**:
 
 | # | Rule ID | Severity | Category | Methodological Hazard Caught |
 |---|---------|----------|----------|------------------------------|
@@ -78,16 +80,26 @@ Rules are `statci_rule` S3 objects stored in a package registry environment (`.s
 | 2 | `unsafe_parallel_rng` | error | parallel_rng | `mclapply`/`parLapply`/`foreach %dopar%`/`future_*` without L'Ecuyer-CMRG, `clusterSetRNGStream`, `%dorng%`/`doRNG`, or `future.seed` |
 | 3 | `duplicate_parallel_seed` | error | parallel_rng | Constant `set.seed(42)` inside loops or parallel workers producing identical duplicate Monte Carlo draws |
 | 4 | `preprocessing_before_split` | error | data_leakage | Global `scale()`, `prcomp()`, `preProcess()`, `mice()`, etc. executed on a dataset before train/test splitting |
-| 5 | `uncentered_mlm_interaction` | warning | modeling | Fixed-effect interactions (`*`, `:`) in `lmer`/`glmer`/`lme`/`glmmTMB`/`brm` using raw predictors with no centering call, naming suffix, or prior centering definition |
-| 6 | `silent_listwise_mismatch` | warning | modeling | Comparing models with differing predictor sets via `anova()`, `AIC()`, `BIC()`, or `lrtest()` on an unharmonized dataset without `na.omit`/`complete.cases`/`drop_na`/`na.action = na.fail` |
-| 7 | `silent_factor_drop` | warning | modeling | `as.numeric()`/`as.integer()` applied directly to a factor variable (coercing level indices), or passing a `subset()`/`filter()` data frame to modeling/contrast functions without `droplevels()`/`fct_drop()` |
-| 8 | `equality_on_float` | warning | numerics | Exact `==` / `!=` on floating-point literals or computed continuous expressions instead of `all.equal()`, `near()`, or tolerance checks |
-| 9 | `unadjusted_multiple_testing` | warning | inference | Hypothesis tests (`t.test`, `cor.test`, `wilcox.test`, `lm` p-values, etc.) run inside loops/applies without `p.adjust()` or multiple-testing correction in scope |
-| 10 | `missing_convergence_check` | warning | modeling | Iterative models (`lmer`, `glmer`, `optim`, `nlminb`, `glmmTMB`) fitted without programmatic AST checks for convergence or `isSingular()` |
-| 11 | `global_seed_override_in_fn` | warning | reproducibility | Calling bare `set.seed()` inside reusable functions or `\(...)` lambdas without restoring `.Random.seed` via `on.exit()` or `withr::local_seed()`/`with_seed()` |
-| 12 | `short_logical_literal` | warning | hygiene | Using mutable `T`/`F` symbols as logical literals/arguments instead of reserved `TRUE`/`FALSE` (ignoring user-bound numeric variables like `T <- 100`) |
-| 13 | `cor_without_use_arg` | info | modeling | Calling `cor()` or `cov()` without an explicit `use =` missing-data policy |
-| 14 | `absolute_path_in_script` | warning | reproducibility | Hardcoded machine-specific absolute paths (`/Users/...`, `/home/...`, `C:\...`, `~/...`) in file I/O or `setwd()` calls |
+| 5 | `in_sample_prediction_eval` | warning | data_leakage | Evaluating RMSE/MAE/AUC/MSE on training-set predictions rather than held-out test/CV data |
+| 6 | `uncentered_mlm_interaction` | warning | modeling | Fixed-effect interactions (`*`, `:`) in `lmer`/`glmer`/`lme`/`glmmTMB`/`brm` using raw predictors with no centering call, naming suffix, or prior centering definition |
+| 7 | `silent_listwise_mismatch` | warning | modeling | Comparing models with differing predictor sets via `anova()`, `AIC()`, `BIC()`, or `lrtest()` on an unharmonized dataset without `na.omit`/`complete.cases`/`drop_na`/`na.action = na.fail` |
+| 8 | `silent_factor_drop` | warning | modeling | `as.numeric()`/`as.integer()` applied directly to a factor variable (coercing level indices), or passing a `subset()`/`filter()` data frame to modeling/contrast functions without `droplevels()`/`fct_drop()` |
+| 9 | `silent_na_coercion` | warning | data_integrity | Unchecked `as.numeric()`/`as.integer()` coercion of character/parsed strings without `anyNA()`/`is.na()` checks |
+| 10 | `unverified_merge_cardinality` | warning | data_integrity | `dplyr::*_join()` or base `merge()` without `relationship =` or `nrow()` guards against silent many-to-many row duplication |
+| 11 | `missing_drop_false_matrix` | warning | data_integrity | 2D matrix/array subsetting (`X[, cols]`, `X[idx, ]`) lacking `drop = FALSE`, silently collapsing 1-row/1-column matrices to atomic vectors |
+| 12 | `implicit_na_rm_masking` | info | data_integrity | Unconditional `na.rm = TRUE` in summary statistics without nearby missingness inspection (`is.na()`, `anyNA()`, `complete.cases()`) |
+| 13 | `equality_on_float` | warning | numerics | Exact `==` / `!=` on floating-point literals or computed continuous expressions instead of `all.equal()`, `near()`, or tolerance checks |
+| 14 | `unadjusted_multiple_testing` | warning | inference | Hypothesis tests (`t.test`, `cor.test`, `wilcox.test`, `lm` p-values, etc.) run inside loops/applies without `p.adjust()` or multiple-testing correction in scope |
+| 15 | `stepwise_selection_unvalidated` | warning | modeling | In-sample `step()`/`MASS::stepAIC()`/`regsubsets()` without cross-validation or holdout validation |
+| 16 | `missing_convergence_check` | warning | modeling | Iterative models (`lmer`, `glmer`, `optim`, `nlminb`, `glmmTMB`) fitted without programmatic AST checks for convergence or `isSingular()` |
+| 17 | `global_seed_override_in_fn` | warning | reproducibility | Calling bare `set.seed()` inside reusable functions or `\(...)` lambdas without restoring `.Random.seed` via `on.exit()` or `withr::local_seed()`/`with_seed()` |
+| 18 | `short_logical_literal` | warning | hygiene | Using mutable `T`/`F` symbols as logical literals/arguments instead of reserved `TRUE`/`FALSE` (ignoring user-bound numeric variables like `T <- 100`) |
+| 19 | `cor_without_use_arg` | info | modeling | Calling `cor()` or `cov()` without an explicit `use =` missing-data policy |
+| 20 | `absolute_path_in_script` | warning | reproducibility | Hardcoded machine-specific absolute paths (`/Users/...`, `/home/...`, `C:\...`, `~/...`) in file I/O or `setwd()` calls |
+
+### 2.4 Incremental Git-Diff Pull-Request Linting (`stat_lint_diff()`)
+
+`stat_lint_diff()` parses unified diffs (`diff_text` or read-only `git diff --unified=0` against strictly validated Git refs via `validate_git_ref()`), enforces repository root confinement on every modified file path, executes full-file AST linting (so upstream context like `set.seed()` is preserved), and emits only findings landing on added or modified lines alongside `diff_meta$n_suppressed_untouched`.
 
 ---
 
@@ -189,11 +201,19 @@ Given `data`, `fit_fn(df)`, and `extract_fn(fit)`, `audit_sensitivity()` automat
 
 Each perturbation records baseline estimate, perturbed estimate, absolute shift, relative `% change`, sign-flip indicator, and pass/warn/fail classification.
 
+### 5.1 Multiverse Specification-Curve Auditor (`audit_multiverse()`)
+
+`audit_multiverse()` evaluates a pipeline across the full Cartesian grid of named analytical `decisions` (guarded by `max_specs`), sorting converged specifications by point estimate and computing:
+
+- Overall median, interquartile range (`IQR`), `IQR / |median|` spread ratio, sign consistency, and proportion statistically significant ($p \le \alpha$);
+- One-way per-fork variance decomposition ($\eta^2 = \text{SS}_{\text{between}} / \text{SS}_{\text{total}}$ and median range across each fork's choices) identifying the top driver of estimate dispersion (`most_influential_fork`);
+- Publication-ready two-panel `plot()` combining the sorted specification curve (point estimates and confidence intervals colored by significance) above a decision-choice indicator matrix.
+
 ---
 
 ## 6. Pillar 5: Unified Audit Report & GitHub Actions Integration
 
-- **`statci_report()`** aggregates lint, estimator calibration, SBC, parallel RNG, manuscript, and sensitivity objects into a single `statci_report` S3 object with unified summary metrics and session metadata.
+- **`statci_report()`** aggregates lint, estimator calibration, SBC, power-curve, parallel RNG, manuscript, sensitivity, and multiverse objects into a single `statci_report` S3 object with unified summary metrics and session metadata.
 - **`statci_check_gate()`** enforces CI exit gates (`fail_on = "fail"` or `"warn"`), throwing a structured error in non-interactive CI runs when thresholds are breached.
 - **`render_statci_report()`** generates:
   - Self-contained, offline-capable HTML5 audit dashboards (safely escaped with `htmltools`),

@@ -366,8 +366,10 @@ strip_non_prose_lines <- function(lines, format = "markdown") {
     for (i in seq_len(n)) {
       ln <- lines[i]
       if (!in_verb && grepl("\\\\begin\\{(verbatim|lstlisting|minted)\\}", ln)) {
-        in_verb <- TRUE
         keep[i] <- FALSE
+        if (!grepl("\\\\end\\{(verbatim|lstlisting|minted)\\}", ln)) {
+          in_verb <- TRUE
+        }
         next
       }
       if (in_verb) {

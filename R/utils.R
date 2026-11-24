@@ -311,12 +311,3 @@ fmt_num <- function(x, digits = 3L) {
 fmt_pct <- function(x, digits = 1L) {
   ifelse(is.na(x) | !is.finite(x), "\u2014", paste0(formatC(100 * x, digits = digits, format = "f"), "%"))
 }
-
-#' Safe relative path display
-#' @noRd
-clean_path_label <- function(path) {
-  if (is.null(path) || is.na(path) || !nzchar(path)) {
-    return("<text>")
-  }
-  as.character(path)
-}

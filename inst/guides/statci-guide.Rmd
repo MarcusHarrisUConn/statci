@@ -1,7 +1,7 @@
 ---
 title: "statci: Statistical CI/CD & Verification Field Guide"
 author: "Marcus Harris"
-date: "Version 0.3.0 (2026)"
+date: "Version 0.4.0 (2026)"
 output:
   pdf_document:
     toc: true
@@ -31,17 +31,17 @@ Quantitative research pipelines and statistical R packages frequently ship silen
 
 **`statci`** brings software-engineering-grade continuous integration and probabilistic verification to R scripts, Quarto/RMarkdown/LaTeX manuscripts, and custom statistical estimators across five integrated verification pillars:
 
-1. **AST-Based Statistical Linter** (`stat_lint()`, `stat_lint_dir()`, 17 built-in rules + custom registry + SARIF 2.1.0 export).
+1. **AST-Based Statistical Linter & PR Diff Linting** (`stat_lint()`, `stat_lint_dir()`, `stat_lint_diff()`, 20 built-in rules + custom registry + SARIF 2.1.0 export).
 2. **Estimator Calibration, SBC, Power-Curve & Parallel RNG Harness** (`audit_estimator()`, `audit_sbc()`, `audit_power_curve()`, `check_parallel_rng()`).
 3. **Manuscript-to-Code Consistency Auditor** (`audit_manuscript()` for `.qmd`, `.Rmd`, and `.tex` prose, tables, and internal APA arithmetic).
-4. **Adversarial Sensitivity & Robustness Battery** (`audit_sensitivity()` covering winsorization, LOCO/LOO influence, missingness contrasts, and cluster/row bootstrap).
+4. **Adversarial Sensitivity & Multiverse Specification-Curve Suite** (`audit_sensitivity()`, `audit_multiverse()` covering winsorization, LOCO/LOO influence, missingness contrasts, bootstrap, and Cartesian specification curves).
 5. **Project Orchestration, HTML/Markdown Reports & GitHub Actions CI** (`read_statci_config()`, `statci_audit_project()`, `statci_report()`, `render_statci_report()`, `use_statci_github_action()`).
 
 # Pillar 1: AST-Based Statistical Linter
 
 `statci` parses R code and Quarto/RMarkdown chunks into full XML abstract syntax trees via `parse(keep.source = TRUE)`, `xmlparsedata`, and `xml2`. For `.qmd` and `.Rmd` files, blank-line-preserving document projection maintains exact 1-based original line numbers and cross-chunk scope awareness.
 
-## Built-in Methodological Rule Catalog (17 Rules)
+## Built-in Methodological Rule Catalog (20 Rules)
 
 ```{r rules-table, echo=FALSE}
 rt <- list_stat_rules()[, c("id", "severity", "category", "title")]
@@ -64,6 +64,10 @@ cat("Clean script findings: ", res_clean$summary$n_findings,
 ```
 
 Inline exceptions use AST `<COMMENT>`-verified directives (`# statci-ignore: <rule_id>` or `# statci-ignore-next-line`), ensuring string literals can never spoof suppressions.
+
+## Incremental PR Diff Linting (`stat_lint_diff()`)
+
+To adopt `statci` incrementally on legacy repositories, `stat_lint_diff()` runs full-file AST analysis (preserving cross-line context such as earlier `set.seed()` calls) and reports only findings landing on added or modified lines from either a supplied unified diff (`diff_text`) or a safe read-only `git diff` against a strictly validated Git ref (`base_ref`, `head_ref`, or `staged = TRUE`).
 
 # Pillar 2: Calibration, SBC, Power Curves & Parallel RNG
 
@@ -130,7 +134,9 @@ ms_res <- audit_manuscript(qmd_ex, models = list(primary = fit))
 ms_res$summary
 ```
 
-# Pillar 4: Adversarial Sensitivity & Robustness Battery
+# Pillar 4: Adversarial Sensitivity & Multiverse Robustness
+
+## Adversarial Sensitivity Battery (`audit_sensitivity()`)
 
 `audit_sensitivity()` perturbs any fitted pipeline across:
 
@@ -138,6 +144,29 @@ ms_res$summary
 2. **Leave-One-Cluster-Out (LOCO) / Leave-One-Out (LOO)** jackknife influence.
 3. **Missingness & Imputation Stress Tests** (observed + MCAR complete-case vs. predictor median/mean imputation).
 4. **Nonparametric Bootstrap Stability** (cluster or row resampling, sign consistency, percentile CIs).
+
+## Multiverse Specification-Curve Auditing (`audit_multiverse()`)
+
+`audit_multiverse()` systematically evaluates a modeling pipeline over a full Cartesian grid of researcher decision forks (e.g., outlier trimming, covariate sets, predictor transformations), summarizing specification-level estimates, CIs, p-values, sign consistency, median/IQR dispersion, and per-fork variance decomposition ($\eta^2$) with a two-panel `plot()` visualization:
+
+```{r multiverse-example}
+mv_demo <- audit_multiverse(
+  data = mtcars,
+  decisions = list(
+    outliers = c("none", "winsor_5pct"),
+    covariates = c("bivariate", "adjusted")
+  ),
+  fit_fn = function(d, spec) {
+    if (spec$outliers == "winsor_5pct") {
+      qs <- stats::quantile(d$mpg, c(0.05, 0.95))
+      d$mpg <- pmin(pmax(d$mpg, qs[1L]), qs[2L])
+    }
+    if (spec$covariates == "bivariate") stats::lm(mpg ~ wt, data = d) else stats::lm(mpg ~ wt + hp, data = d)
+  },
+  param = "wt"
+)
+mv_demo$fork_sensitivity
+```
 
 # Pillar 5: Project Configuration, SARIF & CI/CD
 

@@ -26,3 +26,11 @@ test_mse <- mean((test$y - pred_test)^2)
 # Multiple tests adjusted with Benjamini-Hochberg FDR
 raw_p <- vapply(1:5, function(k) stats::t.test(rnorm(25), var.equal = FALSE)$p.value, numeric(1))
 adj_p <- stats::p.adjust(raw_p, method = "BH")
+
+# Verified merge cardinality, drop = FALSE helper, and audited missingness
+school_meta <- data.frame(school = factor(1:10), urban = rep(c(0, 1), 5))
+merged_df <- merge(df, school_meta, by = "school")
+stopifnot(nrow(merged_df) == nrow(df))
+extract_col <- function(mat, j) mat[, j, drop = FALSE]
+n_miss <- sum(is.na(merged_df$y))
+avg_y <- mean(merged_df$y, na.rm = TRUE)
