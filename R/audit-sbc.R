@@ -134,6 +134,19 @@ audit_sbc <- function(prior,
     if (is.null(param_names)) {
       param_names <- step_out$names
       n_draws <- step_out$L
+    } else {
+      if (!identical(step_out$L, n_draws)) {
+        rlang::abort(paste0(
+          "Inconsistent posterior draw count `L` across SBC replications (expected ",
+          n_draws, ", got ", step_out$L, " on replication ", s,
+          "); SBC requires a fixed draw count L across all simulations."
+        ))
+      }
+      if (!identical(step_out$names, param_names)) {
+        rlang::abort(paste0(
+          "Inconsistent parameter names across SBC replications on replication ", s, "."
+        ))
+      }
     }
     ranks_list[[s]] <- step_out$ranks
     cov50_list[[s]] <- step_out$c50

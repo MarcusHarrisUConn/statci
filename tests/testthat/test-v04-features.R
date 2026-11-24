@@ -24,7 +24,7 @@ test_that("20 built-in AST rules include Rules 18-20 with true positives and 0% 
   # Rule 19: missing_drop_false_matrix
   bad_d1 <- stat_lint_text("f <- function(X, j) X[, j]\n", rules = "missing_drop_false_matrix")
   expect_equal(nrow(bad_d1$findings), 1L)
-  bad_d2 <- stat_lint_text("f <- \\(M, i, k) M[i, k]\n", rules = "missing_drop_false_matrix")
+  bad_d2 <- stat_lint_text("f <- \\(M, k) M[, k]\n", rules = "missing_drop_false_matrix")
   expect_equal(nrow(bad_d2$findings), 1L)
   ok_d1 <- stat_lint_text("f <- function(X, j) X[, j, drop = FALSE]\n", rules = "missing_drop_false_matrix")
   expect_equal(nrow(ok_d1$findings), 0L)

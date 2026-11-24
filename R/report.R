@@ -564,12 +564,13 @@ build_markdown_report <- function(report, title) {
   if (!is.null(comp$multiverse)) {
     mv <- comp$multiverse
     ms <- mv$summary
+    safe_param <- gsub("`", "'", md_escape_cell(ms$parameter), fixed = TRUE)
     out <- c(
       out,
       "## 6. Multiverse Specification Curve",
       "",
       paste0(
-        "- **Parameter:** `", ms$parameter, "` (", ms$n_valid, "/", ms$n_specs, " specs) | ",
+        "- **Parameter:** `", safe_param, "` (", ms$n_valid, "/", ms$n_specs, " specs) | ",
         "**Median:** ", fmt_num(ms$median_est, 4L), " | **IQR:** ", fmt_num(ms$iqr_est, 4L),
         " | **Sign Consistency:** ", fmt_pct(ms$sign_consistency),
         " | **Significant:** ", fmt_pct(ms$prop_significant)

@@ -1,10 +1,41 @@
 # Security & Adversarial Hardening (`statci`)
 
-This document describes the threat model, v0.2.0 red-team audit findings, and concrete mitigations implemented in `statci` (`R/security.R` and across all verification engines).
+This document describes the threat model, v0.2.0 and v0.5.0 red-team audit findings, and concrete mitigations implemented in `statci` (`R/security.R` and across all verification engines).
 
 ## Reporting a Vulnerability
 
 Please report security issues privately via the repository issue tracker or email (`marcus.harris.uconn@gmail.com`).
+
+---
+
+## v0.5.0 Independent Peer Red-Team Audit Findings & Mitigations
+
+Following an independent adversarial red-team review of `statci` v0.4.0, all 20 findings (6 High, 10 Medium, 4 Low) were remediated and locked down with permanent regression tests in `tests/testthat/test-peer-redteam.R`:
+
+### 1. Symlinked Ancestor Write Escape & Dangling Symlink Rejection (`validate_contained_dest()`)
+- **Finding:** On POSIX platforms, `normalizePath(..., mustWork = FALSE)` does not resolve symlinked ancestor directories when a leaf file or nested subdirectory does not yet exist, allowing `use_statci_github_action(file = "link/ci.yaml")` and `statci_audit_project()` (`report.output_dir: link/sub`) to write files outside the project root.
+- **Mitigation (`R/security.R`):** `validate_contained_dest()` now walks every path component incrementally from the canonicalized `root_dir`, inspecting `Sys.readlink()` at each segment, rejecting dangling symlinks, and verifying that every existing canonicalized ancestor remains strictly inside `root_dir`.
+
+### 2. External Directory Read & Code-Snippet Leakage via `lint.paths` (`statci_audit_project()`)
+- **Finding:** `.statci.yml` `lint.paths` entries pointing to symlinks targeting directories outside the project root could cause `statci_audit_project()` to scan external files and embed code snippets in HTML/Markdown/SARIF reports.
+- **Mitigation (`R/config.R`):** Every `lint.paths` entry is now validated through `validate_contained_dest(root_norm, lp, arg = "lint.paths", allow_root = TRUE)` before any directory scan executes.
+
+### 3. Unified Diff Hunk-Termination Bypass & Safe Path Decoding (`stat_lint_diff()`)
+- **Finding:** Added lines beginning with `++ ` (emitted as `+++ ...`) or deleted lines beginning with `-- ` (emitted as `--- ...`) inside an active unified diff hunk previously flipped `in_hunk <- FALSE`, silently dropping all subsequent added lines in the hunk. Additionally, Git octal-quoted UTF-8 paths (`"b/caf\303\251.R"`) and spaces/parentheses in filenames caused skips or aborts.
+- **Mitigation (`R/lint-diff.R`, `R/security.R`):** `parse_unified_diff()` now tracks exact remaining old/new hunk line counts (`rem_old`, `rem_new`) from `@@ -a,b +c,d @@` headers so active hunk lines never terminate parsing; invokes `git -c core.quotepath=false diff`; decodes C-quoted octal escapes for raw `diff_text`; strips `b/` only on Git/`a/` diffs; and validates diff paths with `validate_safe_diff_rel_path()` (blocking control bytes, `..`, absolute/drive/home paths, backslashes, and symlink escapes while permitting spaces, parentheses, and UTF-8).
+
+### 4. Markdown Multiverse Report HTML/XSS Neutralization (`render_statci_report()`)
+- **Finding:** `build_markdown_report()` interpolated multiverse `ms$parameter` directly inside backticks, allowing payloads containing backticks and `<script>` tags to break out and inject raw HTML into Markdown reports and `$GITHUB_STEP_SUMMARY`.
+- **Mitigation (`R/report.R`):** `ms$parameter` is now passed through `md_escape_cell()` with backticks neutralized before Markdown interpolation.
+
+### 5. SARIF 2.1.0 Schema Compliance, RFC-3986 URI Encoding & Host Path Stripping (`export_statci_sarif()`)
+- **Finding:** `NA` line/column values serialized as `"startLine": "NA"`; `#`, `?`, `%`, and spaces were unencoded in `artifactLocation.uri`; and omitting `base_uri` leaked absolute host filesystem paths into `uri` and `primaryLocationLineHash`.
+- **Mitigation (`R/sarif.R`):** `startLine` and `startColumn` are coerced strictly to positive integers (`>= 1L`); every URI segment is RFC-3986 percent-encoded; and absolute paths without a matching `base_uri` are relativized to `getwd()` or reduced to `basename()` so host directories are never leaked.
+
+### 6. Strict YAML Config Validation & AST/Auditor Integrity Hardening
+- **Config (`R/config.R`):** Rejects top-level and section YAML sequences (unnamed lists), non-finite `manuscript.tol_extra` (`.inf`/`.na`), and `NA` booleans (`warn_rounding: .na`, `check_internal: .na`).
+- **AST Linter (`R/lint-parser.R`, `R/lint-rules.R`):** Closed pipe (`|>` / `%>%`) and lexical-scoping evasions across 10 rules, eliminated false positives on positional `predict(fit, test_df)` and scalar matrix lookups (`m[i, 1]`), and fixed Quarto/Rmd doc-fence nesting, `~~~{r}` tilde chunks, and blank lines before `#| eval: false`.
+- **Auditors (`R/audit-*.R`):** Enforced reserved/duplicate fork name checks, pre-`expand.grid()` `max_specs` guard, and `NA`-level preservation in `audit_multiverse()`; confidence-level-aware CI arithmetic, impossible `p`/`R^2` bounds, GFM outer-pipe-free tables, and regex-safe model matching in `audit_manuscript()`; strict `NA` and out-of-`[0,1]` p-value handling in `audit_power_curve()`; collinear/NA-cluster/numeric-cluster resilience in `audit_sensitivity()`; degenerate SE/CI failure checks in `audit_estimator()`; and consistent draw-count enforcement in `audit_sbc()`.
 
 ---
 

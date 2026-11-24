@@ -106,8 +106,11 @@ audit_estimator <- function(dgp,
   if (is.na(n_sim) || n_sim < 10L) {
     rlang::abort("`n_sim` must be an integer >= 10.")
   }
-  if (!is.numeric(alpha) || length(alpha) != 1L || alpha <= 0 || alpha >= 1) {
-    rlang::abort("`alpha` must be strictly between 0 and 1.")
+  if (!is.numeric(alpha) || length(alpha) != 1L || !is.finite(alpha) || alpha <= 0 || alpha >= 1) {
+    rlang::abort("`alpha` must be a finite numeric scalar strictly between 0 and 1.")
+  }
+  if (!is.null(true_params) && (!is.numeric(true_params) || length(true_params) < 1L || any(!is.finite(true_params)))) {
+    rlang::abort("`true_params` must be NULL or a non-empty finite numeric vector.")
   }
 
   withr::local_seed(
@@ -278,6 +281,8 @@ run_estimator_replications <- function(dgp, estimator, params_arg, n_sim, alpha)
   n_error <- 0L
   n_nonconverged <- 0L
   n_singular <- 0L
+  any_se_field <- FALSE
+  any_ci_field <- FALSE
   pnames <- NULL
 
   for (m in seq_len(n_sim)) {
@@ -330,6 +335,8 @@ run_estimator_replications <- function(dgp, estimator, params_arg, n_sim, alpha)
     if (is.null(pnames)) {
       pnames <- names(rec$estimate)
     }
+    if (isTRUE(rec$has_se)) any_se_field <- TRUE
+    if (isTRUE(rec$has_ci)) any_ci_field <- TRUE
     est_list[[m]] <- rec$estimate[pnames]
     se_list[[m]] <- rec$se[pnames]
     cil_list[[m]] <- rec$ci_lower[pnames]
@@ -343,7 +350,8 @@ run_estimator_replications <- function(dgp, estimator, params_arg, n_sim, alpha)
     return(list(
       estimates = empty_m, se = empty_m, ci_lower = empty_m, ci_upper = empty_m,
       p_value = empty_m, n_valid = 0L, n_error = n_error,
-      n_nonconverged = n_nonconverged, n_singular = n_singular
+      n_nonconverged = n_nonconverged, n_singular = n_singular,
+      any_se_field = any_se_field, any_ci_field = any_ci_field
     ))
   }
 
@@ -362,7 +370,9 @@ run_estimator_replications <- function(dgp, estimator, params_arg, n_sim, alpha)
     n_valid = length(valid),
     n_error = n_error,
     n_nonconverged = n_nonconverged,
-    n_singular = n_singular
+    n_singular = n_singular,
+    any_se_field = any_se_field,
+    any_ci_field = any_ci_field
   )
 }
 
@@ -441,9 +451,10 @@ evaluate_recovery <- function(sim, true_params, alpha, mc_alpha, bias_tol_mc, se
     }
 
     # Model SE vs Empirical SE ratio
-    se_vals <- sim$se[, pnm]
-    se_vals <- se_vals[is.finite(se_vals) & se_vals > 0]
-    if (length(se_vals) >= 2L && emp_se > 0) {
+    raw_se <- sim$se[, pnm]
+    se_vals <- raw_se[is.finite(raw_se) & raw_se > 0]
+    has_degenerate_se <- any(!is.na(raw_se) & (!is.finite(raw_se) | raw_se <= 0))
+    if (length(se_vals) >= 2L && emp_se > 0 && !has_degenerate_se) {
       mean_model_se <- mean(se_vals)
       se_ratio <- mean_model_se / emp_se
       se_ratio_mcse <- se_ratio / sqrt(2 * (M - 1))
@@ -457,6 +468,11 @@ evaluate_recovery <- function(sim, true_params, alpha, mc_alpha, bias_tol_mc, se
       } else {
         se_ratio_status <- "pass"
       }
+    } else if (has_degenerate_se || (isTRUE(sim$any_se_field) && length(se_vals) < 2L)) {
+      mean_model_se <- if (any(is.finite(raw_se))) mean(raw_se[is.finite(raw_se)]) else NA_real_
+      se_ratio <- if (is.finite(mean_model_se) && emp_se > 0) mean_model_se / emp_se else NA_real_
+      se_ratio_mcse <- NA_real_
+      se_ratio_status <- "fail"
     } else {
       mean_model_se <- NA_real_
       se_ratio <- NA_real_
@@ -490,7 +506,7 @@ evaluate_recovery <- function(sim, true_params, alpha, mc_alpha, bias_tol_mc, se
       cov_ci_lo <- NA_real_
       cov_ci_hi <- NA_real_
       cov_p <- NA_real_
-      cov_status <- "pass"
+      cov_status <- if (isTRUE(sim$any_ci_field) || isTRUE(sim$any_se_field)) "fail" else "pass"
     }
 
     row_status <- combine_status(c(bias_status, cov_status, se_ratio_status))

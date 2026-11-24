@@ -18,6 +18,10 @@ extract_r_chunks <- function(lines, skip_eval_false = FALSE) {
   chunks <- list()
 
   in_chunk <- FALSE
+  in_outer_fence <- FALSE
+  outer_char <- ""
+  outer_len <- 0L
+  fence_char <- ""
   fence_len <- 0L
   chunk_idx <- 0L
   cur_label <- NA_character_
@@ -27,11 +31,23 @@ extract_r_chunks <- function(lines, skip_eval_false = FALSE) {
 
   for (i in seq_len(n)) {
     ln <- lines[i]
+    if (in_outer_fence) {
+      close_outer <- paste0("^[[:space:]]*", outer_char, "{", outer_len, ",}[[:space:]]*$")
+      if (grepl(close_outer, ln)) {
+        in_outer_fence <- FALSE
+        outer_char <- ""
+        outer_len <- 0L
+      }
+      next
+    }
+
     if (!in_chunk) {
-      m <- regexec("^[[:space:]]*(`{3,})[[:space:]]*\\{[[:space:]]*[rR]([[:space:],=][^}]*)?\\}[[:space:]]*$", ln)
+      # Match executable R chunk fenced with backticks (```) or tildes (~~~)
+      m <- regexec("^[[:space:]]*(`{3,}|~{3,})[[:space:]]*\\{[[:space:]]*[rR]([[:space:],=][^}]*)?\\}[[:space:]]*$", ln)
       caps <- regmatches(ln, m)[[1L]]
       if (length(caps) >= 2L) {
         in_chunk <- TRUE
+        fence_char <- substr(caps[2L], 1L, 1L)
         fence_len <- nchar(caps[2L])
         chunk_idx <- chunk_idx + 1L
         header_opts <- if (length(caps) >= 3L) trimws(caps[3L]) else ""
@@ -51,16 +67,28 @@ extract_r_chunks <- function(lines, skip_eval_false = FALSE) {
         }
         cur_start <- i
         cur_code_start <- i + 1L
+      } else {
+        # Track non-R fenced blocks (e.g., ````markdown ... ````) so illustrative
+        # chunks inside documentation fences are not falsely extracted as R code
+        m_out <- regexec("^[[:space:]]*(`{3,}|~{3,})[[:space:]]*[^`~]*$", ln)
+        ocaps <- regmatches(ln, m_out)[[1L]]
+        if (length(ocaps) >= 2L) {
+          in_outer_fence <- TRUE
+          outer_char <- substr(ocaps[2L], 1L, 1L)
+          outer_len <- nchar(ocaps[2L])
+        }
       }
     } else {
-      # Check closing fence
-      close_pat <- paste0("^[[:space:]]*`{", fence_len, ",}[[:space:]]*$")
+      # Check closing fence matching opening character and length
+      close_pat <- paste0("^[[:space:]]*", fence_char, "{", fence_len, ",}[[:space:]]*$")
       if (grepl(close_pat, ln)) {
         code_end <- i - 1L
         chunk_lines <- if (code_end >= cur_code_start) lines[cur_code_start:code_end] else character(0)
 
-        # Inspect Quarto YAML pipe comments (#| label: ..., #| eval: false)
+        # Inspect Quarto YAML pipe comments (#| label: ..., #| eval: false),
+        # allowing leading blank lines before the first #| option line
         for (cl in chunk_lines) {
+          if (!nzchar(trimws(cl))) next
           if (!grepl("^[[:space:]]*#\\|", cl)) break
           if (grepl("^[[:space:]]*#\\|[[:space:]]*label[[:space:]]*:", cl)) {
             lbl <- trimws(sub("^[[:space:]]*#\\|[[:space:]]*label[[:space:]]*:", "", cl))

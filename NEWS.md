@@ -1,3 +1,26 @@
+# statci 0.5.0
+
+## Security Hardening & Independent Peer Red-Team Remediation
+- Remediated all 20 findings (6 High, 10 Medium, 4 Low) from an independent peer adversarial audit and added 115 permanent regression test expectations in `tests/testthat/test-peer-redteam.R` (574 total passing expectations, 93.25% line coverage):
+  - **Symlink & path containment (`R/security.R`, `R/config.R`):** Rewrote `validate_contained_dest()` to walk every path segment from canonicalized `root_dir`, rejecting symlinked ancestors pointing outside the project root and dangling symlinks (securing `use_statci_github_action()` and `statci_audit_project(report.output_dir)`). Enforced canonical containment on every `lint.paths` entry in `statci_audit_project()` to prevent external file reads and code-snippet leakage.
+  - **Diff parser & safe filenames (`R/lint-diff.R`, `R/security.R`):** Rewrote `parse_unified_diff()` with exact old/new hunk line counters (`rem_old`, `rem_new`) so added `++ ` (`+++ ...`) and deleted `-- ` (`--- ...`) lines inside active hunks never prematurely terminate hunk parsing. Passed `-c core.quotepath=false` to `git diff`, decoded octal C-quoted UTF-8 paths in `diff_text`, guarded `b/` stripping for plain `diff -u`, and added `validate_safe_diff_rel_path()` supporting spaces, parentheses, and UTF-8 filenames safely.
+  - **Report & SARIF hardening (`R/report.R`, `R/sarif.R`):** Escaped `ms$parameter` via `md_escape_cell()` (neutralizing backticks and HTML tags) in Markdown multiverse reports. Hardened `export_statci_sarif()` to emit positive integer `startLine`/`startColumn` (`>= 1L`, never `"NA"`), RFC-3986 percent-encode URI path segments (`#`, `?`, `%`, spaces, UTF-8), and never leak absolute host paths when `base_uri = NULL`.
+  - **YAML config validation (`R/config.R`):** Rejected top-level and section YAML sequences (unnamed lists), non-finite `manuscript.tol_extra` (`.inf`/`.na`), and `NA` booleans (`warn_rounding: .na`, `check_internal: .na`).
+
+## AST Linter & Auditor Accuracy Fixes
+- **AST rules (`R/lint-rules.R`, `R/lint-parser.R`):**
+  - Eliminated false positives on positional out-of-sample `predict(fit, test_df)` in `in_sample_prediction_eval` and caught piped `fit |> predict()`, `fit |> fitted()`, and `df |> lm(y ~ x, data = _)`.
+  - Eliminated false positives on scalar element lookups (`m[i, 1]`, `coef(summary(fit))[2, 4]`, `df[1, "col"]`) in `missing_drop_false_matrix` while catching single-row slices (`X[1, ]`) and dynamic slices (`X[, 1:p]`).
+  - Closed pipe (`|>` / `%>%`) evasions in `silent_na_coercion`, `silent_factor_drop`, and `preprocessing_before_split` (`df2 <- df |> mutate(x = scale(x)); initial_split(df2)`).
+  - Hardened `unseeded_randomness` (removed `RNGkind` from seed functions; added higher-order `lapply`/`sapply`/`vapply`/`apply`/`replicate`/`do.call`/`map*` detection), `equality_on_float` (top-level string/NULL literal check only), `short_logical_literal` (lexical function-scope binding tracking), `unverified_merge_cardinality` (strict symbol/pipe binding), `stepwise_selection_unvalidated` (token-boundary split matching), and `implicit_na_rm_masking` (expanded aggregators, positional `na.rm`, prior/matching-symbol guard scoping).
+  - Updated Quarto/Rmd chunk extraction (`extract_r_chunks()`) to respect outer non-R documentation fences (```` ````markdown ````), support tilde-fenced `~~~{r}` chunks, and allow blank lines before `#| eval: false`.
+- **Verification auditors (`R/audit-*.R`, `R/utils.R`):**
+  - `audit_multiverse()`: rejected reserved/duplicate decision fork names, enforced `max_specs` before `expand.grid()`, validated finite `alpha`, preserved `NA` fork choices as `"<NA>"` in variance decomposition and plots, and aligned `most_influential_fork` with `eta_squared > 1e-12 || median_range > 1e-12`.
+  - `audit_manuscript()`: respected reported CI confidence levels (`90%`, `95%`, `99%`) in internal arithmetic, parsed outer-pipe-free GFM tables, flagged impossible `p` outside `[0, 1]` and `R^2 > 1`, handled empty `.rds` model lists and regex metacharacters in model names, validated finite `tol_extra`, and ignored resampling prose (`B = 1000 bootstrap samples`).
+  - `audit_power_curve()`: preserved `NA` in `list(reject = NA)`, rejected non-finite or out-of-`[0, 1]` p-values as failed replications, validated finite scalar arguments and unique `effect_grid`, and computed finite `mde` magnitude on negative-only grids.
+  - `audit_sensitivity()`: handled collinear `lm` models with `NA` coefficients, safely filtered `NA` cluster IDs in LOCO, and preserved numeric/integer cluster column types in cluster bootstrap.
+  - `audit_estimator()` & `audit_sbc()`: rejected non-finite `true_params`/`alpha`, failed degenerate zero-SE or all-`NA`-CI estimators when SE/CI fields are returned, and aborted on inconsistent posterior draw counts `L` across SBC replications.
+
 # statci 0.4.0
 
 ## New Features

@@ -155,7 +155,9 @@ normalize_estimator_result <- function(res, alpha = 0.05) {
       ci_upper = ci_u,
       p_value = pval,
       converged = conv,
-      singular = singular
+      singular = singular,
+      has_se = TRUE,
+      has_ci = TRUE
     ))
   }
 
@@ -189,7 +191,9 @@ normalize_estimator_result <- function(res, alpha = 0.05) {
       ci_upper = ci_u,
       p_value = pval,
       converged = conv,
-      singular = any(is.na(stats::coef(res)))
+      singular = any(is.na(stats::coef(res))),
+      has_se = TRUE,
+      has_ci = TRUE
     ))
   }
 
@@ -213,6 +217,8 @@ normalize_estimator_result <- function(res, alpha = 0.05) {
       stats::setNames(NA_real_, names(est)[1L])
     }
     pval <- stats::setNames(as.numeric(res$p.value)[1L], names(est)[1L])
+    has_ci_flag <- !is.null(ci) && length(ci) == 2L
+    has_se_flag <- !is.null(res$stderr) || has_ci_flag
     return(list(
       estimate = est,
       se = se,
@@ -220,7 +226,9 @@ normalize_estimator_result <- function(res, alpha = 0.05) {
       ci_upper = ci_u,
       p_value = pval,
       converged = TRUE,
-      singular = FALSE
+      singular = FALSE,
+      has_se = has_se_flag,
+      has_ci = has_ci_flag
     ))
   }
 
@@ -238,7 +246,9 @@ normalize_estimator_result <- function(res, alpha = 0.05) {
       ci_upper = na_vec,
       p_value = na_vec,
       converged = TRUE,
-      singular = FALSE
+      singular = FALSE,
+      has_se = FALSE,
+      has_ci = FALSE
     ))
   }
 
@@ -287,7 +297,9 @@ normalize_estimator_result <- function(res, alpha = 0.05) {
       ci_upper = ci_u,
       p_value = pval,
       converged = conv,
-      singular = singular
+      singular = singular,
+      has_se = !is.null(res$se),
+      has_ci = !is.null(res$ci_lower) || !is.null(res$ci_upper)
     ))
   }
 

@@ -154,6 +154,9 @@ load_models_input <- function(models) {
     validate_existing_file(models, arg = "models")
     obj <- readRDS(models)
     if (is.list(obj) && !inherits(obj, c("lm", "glm", "htest", "data.frame", "lmerMod", "glmerMod"))) {
+      if (length(obj) == 0L) {
+        return(list())
+      }
       if (is.null(names(obj))) {
         names(obj) <- paste0("model_", seq_along(obj))
       }
@@ -504,7 +507,7 @@ map_table_header_metric <- function(hdr) {
   NA_character_
 }
 
-parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw_line) {
+parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw_line, col_ci_levels = NULL) {
   term_idx <- which(col_metrics == "term")
   row_term <- if (length(term_idx) >= 1L && term_idx[1L] <= length(cells)) {
     trm <- trimws(gsub("^[`*_$]+|[`*_$]+$", "", cells[term_idx[1L]]))
@@ -517,7 +520,7 @@ parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw
 
   num_signed <- "[+-]?(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
   claims <- list()
-  add_tbl_claim <- function(metric, op, raw_val) {
+  add_tbl_claim <- function(metric, op, raw_val, ci_level = NA_real_) {
     clean_num <- gsub(",", "", trimws(raw_val), fixed = TRUE)
     val <- suppressWarnings(as.numeric(clean_num))
     if (is.na(val) || !is.finite(val)) return()
@@ -530,6 +533,7 @@ parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw
       reported_raw = trimws(raw_val),
       reported = val,
       df = NA_real_,
+      ci_level = ci_level,
       unit = rounding_unit(clean_num),
       has_fraction = grepl("[.eE]", clean_num),
       context = substr(trimws(raw_line), 1L, 300L)
@@ -541,13 +545,14 @@ parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw
     if (is.na(m) || m == "term" || j > length(cells)) next
     cell <- normalize_prose_line(trimws(cells[j]))
     if (!nzchar(cell) || cell %in% c("-", "--", "\u2014", "NA", ".")) next
+    lvl_j <- if (!is.null(col_ci_levels) && j <= length(col_ci_levels)) col_ci_levels[j] else 0.95
 
     if (m == "ci_pair") {
       pair_pat <- paste0("[\\[\\(]?[[:space:]]{0,3}(", num_signed, ")[[:space:]]{0,3}(?:,|to|[[:space:]]-[[:space:]])[[:space:]]{0,3}(", num_signed, ")[[:space:]]{0,3}[\\]\\)]?")
       cap <- regmatches(cell, regexec(pair_pat, cell, perl = TRUE))[[1L]]
       if (length(cap) >= 3L) {
-        add_tbl_claim("ci_lower", "=", cap[2L])
-        add_tbl_claim("ci_upper", "=", cap[3L])
+        add_tbl_claim("ci_lower", "=", cap[2L], ci_level = lvl_j)
+        add_tbl_claim("ci_upper", "=", cap[3L], ci_level = lvl_j)
       }
     } else if (m == "p_value") {
       p_cell_pat <- paste0("^(<=|>=|=|<|>)?[[:space:]]{0,3}(", num_signed, ")")
@@ -559,7 +564,7 @@ parse_table_cell_claims <- function(cells, col_metrics, line_num, tag_model, raw
     } else {
       cap <- regmatches(cell, regexec(paste0("^(", num_signed, ")"), cell, perl = TRUE))[[1L]]
       if (length(cap) >= 2L) {
-        add_tbl_claim(m, "=", cap[2L])
+        add_tbl_claim(m, "=", cap[2L], ci_level = if (m %in% c("ci_lower", "ci_upper")) lvl_j else NA_real_)
       }
     }
   }
@@ -576,7 +581,7 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
   num_signed <- "[+-]?(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
   num_pos <- "(?:[0-9]{1,16}\\.[0-9]{1,16}|\\.[0-9]{1,16}|[0-9]{1,16})(?:[eE][+-]?[0-9]{1,4})?"
 
-  add_claim <- function(metric, op, raw_val, extra_df = NA_real_) {
+  add_claim <- function(metric, op, raw_val, extra_df = NA_real_, ci_level = NA_real_) {
     clean_num <- gsub(",", "", trimws(raw_val), fixed = TRUE)
     val <- suppressWarnings(as.numeric(clean_num))
     if (is.na(val) || !is.finite(val)) return()
@@ -589,20 +594,21 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
       reported_raw = trimws(raw_val),
       reported = val,
       df = extra_df,
+      ci_level = ci_level,
       unit = rounding_unit(clean_num),
       has_fraction = grepl("[.eE]", clean_num),
       context = substr(trimws(seg), 1L, 300L)
     )
   }
 
-  # 1. Confidence intervals: 95% CI [0.20, 0.64], CI (-0.50, -0.10), 95% CI: 0.20 to 0.64
+  # 1. Confidence intervals: 90%/95%/99% CI [0.20, 0.64], CI (-0.50, -0.10), 95% CI: 0.20 to 0.64
   ci_brack_pat <- paste0(
-    "(?:[0-9]{2}%[[:space:]]{0,3})?CI[[:space:]]{0,3}(?:=|:)?[[:space:]]{0,3}[\\[\\(][[:space:]]{0,3}(",
+    "(?:([0-9]{2})%[[:space:]]{0,3})?CI[[:space:]]{0,3}(?:=|:)?[[:space:]]{0,3}[\\[\\(][[:space:]]{0,3}(",
     num_signed, ")[[:space:]]{0,3}(?:,|to|[[:space:]]-[[:space:]])[[:space:]]{0,3}(",
     num_signed, ")[[:space:]]{0,3}[\\]\\)]"
   )
   ci_to_pat <- paste0(
-    "(?:[0-9]{2}%[[:space:]]{0,3})?CI[[:space:]]{0,3}(?:=|:)?[[:space:]]{0,3}(",
+    "(?:([0-9]{2})%[[:space:]]{0,3})?CI[[:space:]]{0,3}(?:=|:)?[[:space:]]{0,3}(",
     num_signed, ")[[:space:]]{1,3}to[[:space:]]{1,3}(", num_signed, ")"
   )
 
@@ -611,21 +617,45 @@ extract_claims_from_segment <- function(seg, line_num, tag_model = NA_character_
     if (m_ci[[1L]][1L] != -1L) {
       for (mt in regmatches(norm, m_ci)[[1L]]) {
         cap <- regmatches(mt, regexec(pat, mt, perl = TRUE))[[1L]]
-        if (length(cap) >= 3L) {
-          add_claim("ci_lower", "=", cap[2L])
-          add_claim("ci_upper", "=", cap[3L])
+        if (length(cap) >= 4L) {
+          ci_lvl <- if (nzchar(cap[2L])) {
+            lv <- suppressWarnings(as.numeric(cap[2L]) / 100)
+            if (is.finite(lv) && lv > 0.5 && lv < 1) lv else 0.95
+          } else {
+            0.95
+          }
+          add_claim("ci_lower", "=", cap[3L], ci_level = ci_lvl)
+          add_claim("ci_upper", "=", cap[4L], ci_level = ci_lvl)
         }
       }
     }
   }
 
   # 2. Point estimate: b = ..., beta = ..., B = ..., est = ..., estimate = ..., coef = ...
-  est_pat <- paste0("\\b(?:beta|estimate|est|coef|[bB])[[:space:]]{0,4}=[[:space:]]{0,4}(", num_signed, ")")
+  # Guard against resampling prose like "B = 1000 bootstrap samples"
+  est_pat <- paste0("\\b(beta|estimate|est|coef|[bB])[[:space:]]{0,4}=[[:space:]]{0,4}(", num_signed, ")")
   m_est <- gregexpr(est_pat, norm, perl = TRUE)
   if (m_est[[1L]][1L] != -1L) {
-    for (mt in regmatches(norm, m_est)[[1L]]) {
-      val <- sub("^[^=]*=[[:space:]]*", "", mt)
-      add_claim("estimate", "=", val)
+    starts <- as.integer(m_est[[1L]])
+    lens <- attr(m_est[[1L]], "match.length")
+    mts <- regmatches(norm, m_est)[[1L]]
+    for (idx_e in seq_along(mts)) {
+      mt <- mts[idx_e]
+      cap <- regmatches(mt, regexec(est_pat, mt, perl = TRUE))[[1L]]
+      if (length(cap) >= 3L) {
+        sym_lbl <- cap[2L]
+        val_str <- cap[3L]
+        if (identical(sym_lbl, "B") && !grepl("[.eE]", val_str)) {
+          v_int <- suppressWarnings(as.numeric(val_str))
+          after_txt <- substr(norm, starts[idx_e] + lens[idx_e], min(nchar(norm), starts[idx_e] + lens[idx_e] + 45L))
+          if (is.finite(v_int) && v_int >= 10 &&
+              grepl("bootstrap|boot|permut|simulat|iterat|replicat|resampl|sample|draw|monte\\s*carlo",
+                    after_txt, ignore.case = TRUE, perl = TRUE)) {
+            next
+          }
+        }
+        add_claim("estimate", "=", val_str)
+      }
     }
   }
 
@@ -881,21 +911,23 @@ evaluate_internal_arithmetic <- function(claim_groups, tol_extra = 0) {
           )
         }
 
-        # Half-width vs SE check (1.96*SE for normal up to ~2.78*SE for df >= 4)
+        # Half-width vs SE check respecting reported CI confidence level (e.g., 90%, 95%, 99%)
         if (length(se_idx) == 1L) {
           cs <- cl_list[[se_idx]]
           ds <- 0.5 * (cs$unit %||% 0.01) + tol_extra
           if (cs$reported > ds + 1e-12) {
             hw <- 0.5 * (cu$reported - cl$reported)
             hw_tol <- 0.5 * (dl + du) + 1e-9
-            # Use exact t_crit if df was reported, else generous [1.959, 2.78] interval covering df >= 4..Inf
+            ci_lvl <- cl$ci_level %||% 0.95
+            if (is.na(ci_lvl) || !is.finite(ci_lvl) || ci_lvl <= 0.5 || ci_lvl >= 1) ci_lvl <- 0.95
+            p_tail <- (1 + ci_lvl) / 2
             rep_df <- if (length(t_idx) == 1L) (cl_list[[t_idx]]$df %||% NA_real_) else NA_real_
             if (!is.na(rep_df) && is.finite(rep_df) && rep_df >= 1) {
-              crit_lo <- stats::qt(0.975, df = rep_df) - 0.02
-              crit_hi <- stats::qt(0.975, df = rep_df) + 0.02
+              crit_lo <- stats::qt(p_tail, df = rep_df) - 0.02
+              crit_hi <- stats::qt(p_tail, df = rep_df) + 0.02
             } else {
-              crit_lo <- 1.94
-              crit_hi <- 2.80
+              crit_lo <- stats::qnorm(p_tail) - 0.02
+              crit_hi <- stats::qt(p_tail, df = 4) + 0.02
             }
             exp_lo <- crit_lo * max(0, cs$reported - ds) - hw_tol
             exp_hi <- crit_hi * (cs$reported + ds) + hw_tol
@@ -904,7 +936,7 @@ evaluate_internal_arithmetic <- function(claim_groups, tol_extra = 0) {
               line = grp$line,
               term = grp$tag_term,
               check_type = "internal_ci_width",
-              reported_expr = paste0("SE=", cs$reported_raw, ", CI [", cl$reported_raw, ", ", cu$reported_raw, "]"),
+              reported_expr = paste0("SE=", cs$reported_raw, ", ", round(100 * ci_lvl), "% CI [", cl$reported_raw, ", ", cu$reported_raw, "]"),
               expected_range = paste0("half-width in [", fmt_num(exp_lo, 3L), ", ", fmt_num(exp_hi, 3L), "]"),
               status = if (ok_hw) "pass" else "fail",
               detail = if (ok_hw) "CI half-width consistent with SE" else paste0(
@@ -913,6 +945,34 @@ evaluate_internal_arithmetic <- function(claim_groups, tol_extra = 0) {
             )
           }
         }
+      }
+    }
+
+    # (c) Probability & fit-statistic domain bounds (p in [0, 1], R^2 in [-0.5, 1])
+    for (cp in cl_list[which(metrics == "p_value")]) {
+      if (cp$reported < -1e-9 || cp$reported > 1 + 1e-9) {
+        add_ic(
+          line = grp$line,
+          term = grp$tag_term,
+          check_type = "internal_p_bounds",
+          reported_expr = paste0("p ", cp$op, " ", cp$reported_raw),
+          expected_range = "[0, 1]",
+          status = "fail",
+          detail = paste0("Impossible p-value (", cp$reported_raw, ") outside [0, 1].")
+        )
+      }
+    }
+    for (cr in cl_list[which(metrics == "r_squared")]) {
+      if (cr$reported > 1 + 0.5 * (cr$unit %||% 0.01) + tol_extra + 1e-9 || cr$reported < -0.5) {
+        add_ic(
+          line = grp$line,
+          term = grp$tag_term,
+          check_type = "internal_r2_bounds",
+          reported_expr = paste0("R^2 = ", cr$reported_raw),
+          expected_range = "[0, 1]",
+          status = "fail",
+          detail = paste0("Impossible R^2 (", cr$reported_raw, ") outside [0, 1].")
+        )
       }
     }
   }
@@ -933,6 +993,15 @@ evaluate_internal_arithmetic <- function(claim_groups, tol_extra = 0) {
 
 audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_rounding,
                                    default_model, format = "markdown", check_internal = TRUE) {
+  if (!is.numeric(tol_extra) || length(tol_extra) != 1L || !is.finite(tol_extra) || tol_extra < 0) {
+    rlang::abort("`tol_extra` must be a finite non-negative numeric scalar.")
+  }
+  if (!is.logical(warn_rounding) || length(warn_rounding) != 1L || is.na(warn_rounding)) {
+    rlang::abort("`warn_rounding` must be a non-NA logical scalar.")
+  }
+  if (!is.logical(check_internal) || length(check_internal) != 1L || is.na(check_internal)) {
+    rlang::abort("`check_internal` must be a non-NA logical scalar.")
+  }
   raw_models <- load_models_input(models)
   catalog <- lapply(raw_models, extract_single_model)
   model_names <- names(catalog)
@@ -952,11 +1021,24 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
   # Track Markdown / LaTeX table parsing state
   in_md_table <- FALSE
   md_col_metrics <- NULL
+  md_col_ci_levels <- NULL
   md_table_model <- NA_character_
 
   in_tex_tabular <- FALSE
   tex_col_metrics <- NULL
+  tex_col_ci_levels <- NULL
   tex_table_model <- NA_character_
+
+  extract_header_ci_levels <- function(hdrs) {
+    vapply(hdrs, function(h) {
+      cap <- regmatches(h, regexec("([0-9]{2})%", h, perl = TRUE))[[1L]]
+      if (length(cap) >= 2L) {
+        lv <- suppressWarnings(as.numeric(cap[2L]) / 100)
+        if (is.finite(lv) && lv > 0.5 && lv < 1) return(lv)
+      }
+      0.95
+    }, numeric(1L))
+  }
 
   i <- 1L
   n_lines <- length(prose)
@@ -1022,9 +1104,10 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
             mapped <- vapply(cells, map_table_header_metric, character(1L))
             if (any(!is.na(mapped))) {
               tex_col_metrics <- mapped
+              tex_col_ci_levels <- extract_header_ci_levels(cells)
             }
           } else {
-            grp <- parse_table_cell_claims(cells, tex_col_metrics, i, tex_table_model, trimmed)
+            grp <- parse_table_cell_claims(cells, tex_col_metrics, i, tex_table_model, trimmed, col_ci_levels = tex_col_ci_levels)
             if (!is.null(grp)) claim_groups[[length(claim_groups) + 1L]] <- grp
           }
         }
@@ -1033,15 +1116,23 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
       }
     }
 
-    # 3. Markdown / Quarto pipe table detection
-    if (format != "tex" && grepl("^\\|.*\\|$", trimmed)) {
-      if (!in_md_table && i + 1L <= n_lines && grepl("^\\|[[:space:]:|-]+\\|$", trimws(prose[i + 1L]))) {
+    # 3. Markdown / Quarto / GFM pipe table detection (with or without outer `|` borders)
+    if (format != "tex" && grepl("|", trimmed, fixed = TRUE)) {
+      is_gfm_sep <- function(s) {
+        if (!grepl("|", s, fixed = TRUE)) return(FALSE)
+        if (!grepl("^[[:space:]:|-]+$", s)) return(FALSE)
+        s_clean <- sub("^\\|", "", sub("\\|$", "", s))
+        parts <- trimws(strsplit(s_clean, "|", fixed = TRUE)[[1L]])
+        length(parts) >= 2L && all(grepl("^:?-+:?$", parts))
+      }
+      if (!in_md_table && i + 1L <= n_lines && is_gfm_sep(trimws(prose[i + 1L]))) {
         raw_hdr <- sub("^\\|", "", sub("\\|$", "", trimmed))
         hdr_cells <- trimws(strsplit(raw_hdr, "|", fixed = TRUE)[[1L]])
         mapped <- vapply(hdr_cells, map_table_header_metric, character(1L))
         if (any(!is.na(mapped)) && "term" %in% mapped) {
           in_md_table <- TRUE
           md_col_metrics <- mapped
+          md_col_ci_levels <- extract_header_ci_levels(hdr_cells)
           md_table_model <- if (!is.null(line_tag)) line_tag$model else NA_character_
           i <- i + 2L # skip header + separator line
           next
@@ -1049,7 +1140,7 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
       } else if (in_md_table) {
         raw_row <- sub("^\\|", "", sub("\\|$", "", trimmed))
         cells <- trimws(strsplit(raw_row, "|", fixed = TRUE)[[1L]])
-        grp <- parse_table_cell_claims(cells, md_col_metrics, i, md_table_model, trimmed)
+        grp <- parse_table_cell_claims(cells, md_col_metrics, i, md_table_model, trimmed, col_ci_levels = md_col_ci_levels)
         if (!is.null(grp)) claim_groups[[length(claim_groups) + 1L]] <- grp
         i <- i + 1L
         next
@@ -1057,6 +1148,7 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
     } else {
       in_md_table <- FALSE
       md_col_metrics <- NULL
+      md_col_ci_levels <- NULL
     }
 
     # 4. Extract any Quarto inline spans `[...]{.statci ...}` on this line
@@ -1119,7 +1211,8 @@ audit_manuscript_lines <- function(lines, source_label, models, tol_extra, warn_
           m_name <- model_names[1L]
         } else {
           mentioned <- model_names[vapply(model_names, function(nm) {
-            grepl(paste0("\\b", nm, "\\b"), grp$text)
+            nm_esc <- gsub("([.^$*+?()\\[\\]{}|\\\\])", "\\\\\\1", nm, perl = TRUE)
+            grepl(paste0("(?<![A-Za-z0-9_])", nm_esc, "(?![A-Za-z0-9_])"), grp$text, perl = TRUE)
           }, logical(1L))]
           m_name <- if (length(mentioned) == 1L) mentioned[1L] else model_names[1L]
         }

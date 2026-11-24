@@ -85,6 +85,21 @@ audit_multiverse <- function(data,
   if (!is.list(decisions) || length(decisions) < 1L || is.null(names(decisions)) || any(!nzchar(names(decisions)))) {
     rlang::abort("`decisions` must be a non-empty named list of analytical decision choices.")
   }
+  if (anyDuplicated(names(decisions))) {
+    rlang::abort("`decisions` contains duplicate decision fork names.")
+  }
+  reserved_cols <- c(
+    "spec_rank", "spec_id", "estimate", "se", "ci_lower", "ci_upper",
+    "p_value", "significant", "converged", "error"
+  )
+  bad_forks <- intersect(names(decisions), reserved_cols)
+  if (length(bad_forks) > 0L) {
+    rlang::abort(paste0(
+      "Decision fork name(s) collide with reserved result column(s): ",
+      paste(bad_forks, collapse = ", "),
+      ". Rename these decision forks (e.g., `se_type` instead of `se`)."
+    ))
+  }
   for (nm in names(decisions)) {
     if (length(decisions[[nm]]) < 1L) {
       rlang::abort(paste0("Decision fork `", nm, "` must contain at least one choice."))
@@ -93,19 +108,26 @@ audit_multiverse <- function(data,
   if (!is.function(fit_fn)) {
     rlang::abort("`fit_fn` must be a function of signature `function(data, spec)`.")
   }
-  if (!is.numeric(alpha) || length(alpha) != 1L || alpha <= 0 || alpha >= 1) {
-    rlang::abort("`alpha` must be strictly between 0 and 1.")
+  if (!is.numeric(alpha) || length(alpha) != 1L || !is.finite(alpha) || alpha <= 0 || alpha >= 1) {
+    rlang::abort("`alpha` must be a finite numeric scalar strictly between 0 and 1.")
+  }
+  if (!is.numeric(max_specs) || length(max_specs) != 1L || !is.finite(max_specs) || max_specs < 1) {
+    rlang::abort("`max_specs` must be a positive finite integer.")
+  }
+  max_specs <- as.integer(max_specs)[1L]
+
+  # Guard combinatorial size BEFORE materializing expand.grid() to prevent OOM
+  n_specs_est <- prod(as.numeric(lengths(decisions)))
+  if (!is.finite(n_specs_est) || n_specs_est > max_specs) {
+    rlang::abort(paste0(
+      "Multiverse grid contains ", format(n_specs_est, scientific = FALSE, trim = TRUE),
+      " specifications, exceeding `max_specs = ", max_specs,
+      "`. Prune decision levels or raise `max_specs`."
+    ))
   }
 
   grid_df <- expand.grid(decisions, KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
   n_specs <- nrow(grid_df)
-  max_specs <- as.integer(max_specs)[1L]
-  if (n_specs > max_specs) {
-    rlang::abort(paste0(
-      "Multiverse grid contains ", n_specs, " specifications, exceeding `max_specs = ",
-      max_specs, "`. Prune decision levels or raise `max_specs`."
-    ))
-  }
 
   focal_name <- param
   est_v <- rep(NA_real_, n_specs)
@@ -252,7 +274,9 @@ audit_multiverse <- function(data,
   ss_tot <- sum((v_ok - mean_est)^2)
   valid_df <- spec_tbl[ok, , drop = FALSE]
   fork_rows <- lapply(names(decisions), function(dec_nm) {
-    grp_vals <- split(valid_df$estimate, as.character(valid_df[[dec_nm]]))
+    grp_keys <- as.character(valid_df[[dec_nm]])
+    grp_keys[is.na(grp_keys)] <- "<NA>"
+    grp_vals <- split(valid_df$estimate, grp_keys)
     meds <- vapply(grp_vals, stats::median, numeric(1L))
     means <- vapply(grp_vals, mean, numeric(1L))
     ns <- vapply(grp_vals, length, integer(1L))
@@ -269,7 +293,11 @@ audit_multiverse <- function(data,
   })
   fork_tbl <- tibble::as_tibble(do.call(rbind, fork_rows))
   fork_tbl <- fork_tbl[order(fork_tbl$eta_squared, fork_tbl$median_range, decreasing = TRUE), , drop = FALSE]
-  most_inf <- if (nrow(fork_tbl) > 0L && fork_tbl$median_range[1L] > 1e-12) fork_tbl$decision[1L] else NA_character_
+  most_inf <- if (nrow(fork_tbl) > 0L && (fork_tbl$eta_squared[1L] > 1e-12 || fork_tbl$median_range[1L] > 1e-12)) {
+    fork_tbl$decision[1L]
+  } else {
+    NA_character_
+  }
 
   # Unified status gate
   st <- if (fail_rate > max_fail_rate ||
@@ -433,6 +461,7 @@ plot.statci_multiverse <- function(x, ...) {
   choice_labels <- character(0)
   for (dn in dec_names) {
     lvls <- as.character(x$decisions[[dn]])
+    lvls[is.na(lvls)] <- "<NA>"
     choice_labels <- c(choice_labels, paste0(dn, ": ", lvls))
   }
   choice_labels <- rev(unique(choice_labels))
@@ -443,7 +472,9 @@ plot.statci_multiverse <- function(x, ...) {
     rk <- df$plot_rank[i]
     sig <- if (isTRUE(df$significant[i])) "Significant" else "Non-significant"
     for (dn in dec_names) {
-      lbl <- paste0(dn, ": ", as.character(df[[dn]][i]))
+      v_str <- as.character(df[[dn]][i])
+      if (is.na(v_str)) v_str <- "<NA>"
+      lbl <- paste0(dn, ": ", v_str)
       mat_rows[[length(mat_rows) + 1L]] <- data.frame(
         plot_rank = rk,
         y_val = unname(choice_y[[lbl]]),

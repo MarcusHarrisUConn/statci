@@ -92,15 +92,83 @@ validate_safe_rel_path <- function(x, arg, must_be_r_script = FALSE) {
   x
 }
 
-#' Validate that a relative file destination resolves inside a target root dir
+#' Validate a relative path from a Git/unified diff (permits spaces, parens, UTF-8)
+#'
+#' Blocks control bytes, absolute/home/drive paths, backslashes, and `..`
+#' traversal segments while allowing legitimate repository filenames containing
+#' spaces, parentheses, or non-ASCII UTF-8 characters.
+#'
+#' @param x Character scalar relative path.
+#' @param arg Argument name for error messages.
+#' @return Validated character scalar.
 #' @noRd
-validate_contained_dest <- function(root_dir, rel_file, arg = "file") {
+validate_safe_diff_rel_path <- function(x, arg = "diff file path") {
+  assert_clean_scalar_string(x, arg)
+  if (grepl("^(/|~|[A-Za-z]:)", x)) {
+    rlang::abort(paste0("`", arg, "` must be a project-relative path, not an absolute or home path: `", x, "`."))
+  }
+  if (grepl("\\\\", x)) {
+    rlang::abort(paste0("`", arg, "` must use forward slashes (`/`) without backslashes: `", x, "`."))
+  }
+  segs <- strsplit(x, "/", fixed = TRUE)[[1L]]
+  if (any(segs == "..")) {
+    rlang::abort(paste0("`", arg, "` must not contain parent-directory traversal (`..`): `", x, "`."))
+  }
+  x
+}
+
+#' Validate that a relative file/directory destination resolves inside a target root dir
+#'
+#' Walks every existing ancestor and symlink component of `rel_file` under
+#' `root_dir`, resolving symlinks via `normalizePath(..., mustWork = TRUE)` so
+#' non-existent leaf files/subdirectories inside a symlinked parent directory
+#' can never escape `root_dir`.
+#'
+#' @param root_dir Existing root directory.
+#' @param rel_file Project-relative file or directory path.
+#' @param arg Argument name for error messages.
+#' @param allow_root Logical; permit resolving to `root_dir` itself (e.g. `"."`).
+#' @return Resolved path string inside `root_dir`.
+#' @noRd
+validate_contained_dest <- function(root_dir, rel_file, arg = "file", allow_root = FALSE) {
   validate_safe_rel_path(rel_file, arg = arg)
-  root_norm <- normalizePath(root_dir, winslash = "/", mustWork = TRUE)
-  dest_raw <- file.path(root_norm, rel_file)
-  dest_norm <- normalizePath(dest_raw, winslash = "/", mustWork = FALSE)
-  prefix <- paste0(sub("/+$", "", root_norm), "/")
-  if (!startsWith(dest_norm, prefix)) {
+  root_norm <- sub("/+$", "", normalizePath(root_dir, winslash = "/", mustWork = TRUE))
+  prefix <- paste0(root_norm, "/")
+
+  segs <- strsplit(rel_file, "/", fixed = TRUE)[[1L]]
+  segs <- segs[nzchar(segs) & segs != "."]
+
+  if (length(segs) == 0L) {
+    if (isTRUE(allow_root)) {
+      return(root_norm)
+    }
+    rlang::abort(paste0("`", arg, "` must name a path inside project directory `", root_dir, "`."))
+  }
+
+  # Inspect every path component from root downward to block symlink escapes
+  cur <- root_norm
+  for (seg in segs) {
+    cur <- file.path(cur, seg)
+    link_target <- tryCatch(Sys.readlink(cur), error = function(e) "")
+    is_link <- !is.na(link_target) && nzchar(link_target)
+    exists_now <- file.exists(cur) || dir.exists(cur)
+    if (is_link && !exists_now) {
+      rlang::abort(paste0("`", arg, "` traverses a dangling symbolic link: `", rel_file, "`."))
+    }
+    if (is_link || exists_now) {
+      cur_real <- tryCatch(
+        sub("/+$", "", normalizePath(cur, winslash = "/", mustWork = TRUE)),
+        error = function(e) NA_character_
+      )
+      if (is.na(cur_real) || (!identical(cur_real, root_norm) && !startsWith(cur_real, prefix))) {
+        rlang::abort(paste0("`", arg, "` resolves outside project directory `", root_dir, "` via symbolic link."))
+      }
+    }
+  }
+
+  dest_raw <- file.path(root_norm, paste(segs, collapse = "/"))
+  dest_norm <- sub("/+$", "", normalizePath(dest_raw, winslash = "/", mustWork = FALSE))
+  if (!startsWith(dest_norm, prefix) && !(isTRUE(allow_root) && identical(dest_norm, root_norm))) {
     rlang::abort(paste0("`", arg, "` resolves outside project directory `", root_dir, "`."))
   }
   dest_raw

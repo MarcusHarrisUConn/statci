@@ -36,7 +36,10 @@ read_statci_config <- function(path = ".statci.yml") {
     }
   )
   if (is.null(raw)) raw <- list()
-  if (!is.list(raw)) {
+  is_yaml_mapping <- function(x) {
+    is.list(x) && (length(x) == 0L || (!is.null(names(x)) && all(nzchar(names(x)))))
+  }
+  if (!is_yaml_mapping(raw)) {
     rlang::abort("`.statci.yml` must contain a YAML mapping at the top level.")
   }
 
@@ -59,7 +62,7 @@ read_statci_config <- function(path = ".statci.yml") {
 
   # --- lint section ---
   if (!is.null(raw$lint)) {
-    if (!is.list(raw$lint)) rlang::abort("`lint` section must be a YAML mapping.")
+    if (!is_yaml_mapping(raw$lint)) rlang::abort("`lint` section must be a YAML mapping.")
     allowed_lint <- c("paths", "rules", "exclude_rules", "exclude_pattern", "skip_eval_false", "severity_overrides")
     unk_l <- setdiff(names(raw$lint), allowed_lint)
     if (length(unk_l) > 0L) {
@@ -120,7 +123,7 @@ read_statci_config <- function(path = ".statci.yml") {
 
   # --- manuscript section ---
   if (!is.null(raw$manuscript)) {
-    if (!is.list(raw$manuscript)) rlang::abort("`manuscript` section must be a YAML mapping.")
+    if (!is_yaml_mapping(raw$manuscript)) rlang::abort("`manuscript` section must be a YAML mapping.")
     allowed_ms <- c("path", "models", "tol_extra", "warn_rounding", "check_internal")
     unk_m <- setdiff(names(raw$manuscript), allowed_ms)
     if (length(unk_m) > 0L) {
@@ -133,19 +136,21 @@ read_statci_config <- function(path = ".statci.yml") {
       cfg$manuscript$models <- validate_safe_rel_path(raw$manuscript$models, arg = "manuscript.models")
     }
     if (!is.null(raw$manuscript$tol_extra)) {
-      te <- as.numeric(raw$manuscript$tol_extra)[1L]
-      if (is.na(te) || te < 0) rlang::abort("`manuscript.tol_extra` must be a non-negative number.")
+      te <- suppressWarnings(as.numeric(raw$manuscript$tol_extra)[1L])
+      if (!is.numeric(raw$manuscript$tol_extra) || length(raw$manuscript$tol_extra) != 1L || !is.finite(te) || te < 0) {
+        rlang::abort("`manuscript.tol_extra` must be a finite non-negative number.")
+      }
       cfg$manuscript$tol_extra <- te
     }
     if (!is.null(raw$manuscript$warn_rounding)) {
-      if (!is.logical(raw$manuscript$warn_rounding) || length(raw$manuscript$warn_rounding) != 1L) {
-        rlang::abort("`manuscript.warn_rounding` must be a logical scalar.")
+      if (!is.logical(raw$manuscript$warn_rounding) || length(raw$manuscript$warn_rounding) != 1L || is.na(raw$manuscript$warn_rounding)) {
+        rlang::abort("`manuscript.warn_rounding` must be a logical scalar (`true`/`false`).")
       }
       cfg$manuscript$warn_rounding <- raw$manuscript$warn_rounding
     }
     if (!is.null(raw$manuscript$check_internal)) {
-      if (!is.logical(raw$manuscript$check_internal) || length(raw$manuscript$check_internal) != 1L) {
-        rlang::abort("`manuscript.check_internal` must be a logical scalar.")
+      if (!is.logical(raw$manuscript$check_internal) || length(raw$manuscript$check_internal) != 1L || is.na(raw$manuscript$check_internal)) {
+        rlang::abort("`manuscript.check_internal` must be a logical scalar (`true`/`false`).")
       }
       cfg$manuscript$check_internal <- raw$manuscript$check_internal
     }
@@ -153,7 +158,7 @@ read_statci_config <- function(path = ".statci.yml") {
 
   # --- gate section ---
   if (!is.null(raw$gate)) {
-    if (!is.list(raw$gate)) rlang::abort("`gate` section must be a YAML mapping.")
+    if (!is_yaml_mapping(raw$gate)) rlang::abort("`gate` section must be a YAML mapping.")
     unk_g <- setdiff(names(raw$gate), "fail_on")
     if (length(unk_g) > 0L) {
       rlang::abort(paste0("Unknown key(s) under `gate`: ", paste(unk_g, collapse = ", "), "."))
@@ -169,7 +174,7 @@ read_statci_config <- function(path = ".statci.yml") {
 
   # --- report section ---
   if (!is.null(raw$report)) {
-    if (!is.list(raw$report)) rlang::abort("`report` section must be a YAML mapping.")
+    if (!is_yaml_mapping(raw$report)) rlang::abort("`report` section must be a YAML mapping.")
     allowed_rep <- c("title", "output_dir", "formats")
     unk_r <- setdiff(names(raw$report), allowed_rep)
     if (length(unk_r) > 0L) {
@@ -322,8 +327,12 @@ statci_audit_project <- function(path = ".",
     rlang::abort("`config` must be NULL, a path to `.statci.yml`, or a `statci_config` object.")
   }
 
-  # 1. Run AST linter across configured project directories
-  lint_dirs <- file.path(root_norm, cfg$lint$paths)
+  # 1. Run AST linter across configured project directories (strictly confined inside root_norm)
+  lint_dirs <- vapply(
+    cfg$lint$paths,
+    function(lp) validate_contained_dest(root_norm, lp, arg = "lint.paths", allow_root = TRUE),
+    character(1L)
+  )
   lint_dirs <- lint_dirs[dir.exists(lint_dirs)]
   lint_res <- if (length(lint_dirs) > 0L) {
     stat_lint_dir(

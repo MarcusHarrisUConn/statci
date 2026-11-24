@@ -6,7 +6,7 @@ Checked with:
 - `rcmdcheck::rcmdcheck()` (including full PDF reference manual build via `pdflatex` and 5 executable vignettes)
 - `rcmdcheck::rcmdcheck(args = c("--as-cran"), env = c("_R_CHECK_CRAN_INCOMING_REMOTE_" = "false", "_R_CHECK_LIMIT_CORES_" = "true"))`
 - `spelling::spell_check_package()` (0 misspellings)
-- `covr::package_coverage()` (93.18% line coverage across 459 passing test expectations)
+- `covr::package_coverage()` (93.25% line coverage across 574 passing test expectations)
 
 ## Test environments
 
@@ -14,7 +14,7 @@ Checked with:
 
 ## Submission notes
 
-- This is a new CRAN submission (`statci` 0.4.0).
+- This is a new CRAN submission (`statci` 0.5.0).
 - All examples, tests, and vignettes respect the 2-core CRAN limit
   (`_R_CHECK_LIMIT_CORES_=true`), operate completely offline, write temporary
   files only inside `tempdir()` with cleanup, preserve `.Random.seed` via

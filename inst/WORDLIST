@@ -3,8 +3,10 @@ allowlist
 APA
 AST
 biomet
+canonicalized
 Clopper
 CMRG
+collinear
 combinatorial
 DGP
 doi
@@ -12,6 +14,7 @@ dotchart
 et
 fuzzers
 gapped
+GFM
 gg
 hardcoded
 Hardcoded
@@ -32,12 +35,14 @@ ReDoS
 regexes
 renderer
 RMarkdown
+Rmd
 SARIF
 SBC
 SHA
 stochasticity
 Suppressions
 symlink
+symlinked
 symlinks
 Talts
 tibble

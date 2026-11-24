@@ -132,7 +132,7 @@ audit_sensitivity <- function(data,
   }
 
   score_shift <- function(base_v, pert_v) {
-    if (is.na(pert_v) || !is.finite(pert_v)) {
+    if (is.na(base_v) || !is.finite(base_v) || is.na(pert_v) || !is.finite(pert_v)) {
       return(list(abs_diff = NA_real_, pct_change = NA_real_, sign_flip = NA, status = "fail"))
     }
     ad <- abs(pert_v - base_v)
@@ -203,7 +203,8 @@ audit_sensitivity <- function(data,
   if (isTRUE(leave_one_out)) {
     max_u <- as.integer(max_loo_units)[1L]
     if (!is.null(cluster_col)) {
-      units_all <- unique(data[[cluster_col]])
+      cl_vec <- data[[cluster_col]]
+      units_all <- unique(cl_vec[!is.na(cl_vec)])
       if (length(units_all) < 2L) {
         for (j in seq_along(pnames)) {
           rows[[length(rows) + 1L]] <- tibble::tibble(
@@ -244,7 +245,9 @@ audit_sensitivity <- function(data,
     for (u_i in seq_along(units_use)) {
       u_val <- units_use[u_i]
       df_sub <- if (!is.null(cluster_col)) {
-        data[data[[cluster_col]] != u_val, , drop = FALSE]
+        cl_v <- data[[cluster_col]]
+        keep_cl <- is.na(cl_v) | (cl_v != u_val)
+        data[keep_cl, , drop = FALSE]
       } else {
         data[-u_val, , drop = FALSE]
       }
@@ -255,8 +258,9 @@ audit_sensitivity <- function(data,
     for (j in seq_along(pnames)) {
       vals <- loo_mat[, j]
       ok <- is.finite(vals)
-      if (!any(ok)) {
-        add_row("influence", loo_label, pnames[j], baseline[j], NA_real_, "All LOO refits failed")
+      if (!any(ok) || !is.finite(baseline[j])) {
+        add_row("influence", loo_label, pnames[j], baseline[j], NA_real_,
+                if (!is.finite(baseline[j])) "Baseline parameter is non-finite (collinear/NA)" else "All LOO refits failed")
         next
       }
       diffs <- abs(vals - baseline[j])
@@ -389,9 +393,18 @@ audit_sensitivity <- function(data,
         sampled_cl <- sample.int(n_cl, n_cl, replace = TRUE)
         idx <- unlist(cl_split[sampled_cl], use.names = FALSE)
         df_b <- data[idx, , drop = FALSE]
-        # Give each resampled cluster copy a distinct cluster ID so MLM random effects work
+        # Give each resampled cluster copy a distinct cluster ID preserving original column type
         cl_lens <- vapply(cl_split[sampled_cl], length, integer(1L))
-        df_b[[cluster_col]] <- rep(paste0("bcl_", seq_len(n_cl)), times = cl_lens)
+        orig_cl <- data[[cluster_col]]
+        df_b[[cluster_col]] <- if (is.integer(orig_cl)) {
+          rep(seq_len(n_cl), times = cl_lens)
+        } else if (is.numeric(orig_cl)) {
+          as.numeric(rep(seq_len(n_cl), times = cl_lens))
+        } else if (is.factor(orig_cl)) {
+          factor(rep(paste0("bcl_", seq_len(n_cl)), times = cl_lens))
+        } else {
+          rep(paste0("bcl_", seq_len(n_cl)), times = cl_lens)
+        }
         boot_mat[b, ] <- safe_eval(df_b)
       }
     } else {
@@ -408,7 +421,7 @@ audit_sensitivity <- function(data,
       vals <- boot_mat[, j]
       ok <- is.finite(vals)
       f_rate <- 1 - mean(ok)
-      if (sum(ok) < 3L) {
+      if (sum(ok) < 3L || !is.finite(baseline[j])) {
         b_rows[[j]] <- tibble::tibble(
           parameter = pnames[j], baseline = baseline[j], boot_mean = NA_real_,
           boot_se = NA_real_, ci_low = NA_real_, ci_high = NA_real_,

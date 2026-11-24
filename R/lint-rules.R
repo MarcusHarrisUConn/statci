@@ -253,8 +253,11 @@ check_unseeded_randomness <- function(ctx) {
     "randomForest", "ranger", "xgb.train", "cv.glmnet",
     "initial_split", "vfold_cv", "bootstraps", "sampling", "stan", "brm"
   )
-  seed_fns <- c("set.seed", "RNGkind", "clusterSetRNGStream", "local_seed")
+  # Note: RNGkind() only chooses the algorithm and does NOT seed the RNG
+  seed_fns <- c("set.seed", "clusterSetRNGStream", "local_seed")
   wrapper_fns <- c("with_seed", "local_seed", "with_preserve_seed")
+  hof_fns <- c("lapply", "sapply", "vapply", "apply", "mapply", "Map", "replicate", "do.call",
+               "map", "map_dbl", "map_int", "map_chr", "map_lgl", "pmap")
 
   findings <- list()
   earliest_seed_line <- Inf
@@ -270,32 +273,68 @@ check_unseeded_randomness <- function(ctx) {
     }
   }
 
-  # Second pass: inspect top-level stochastic calls
+  is_seeded_at <- function(u, nd, ln) {
+    if (ln > earliest_seed_line) return(TRUE)
+    if (ln == earliest_seed_line) {
+      sc_same <- ast_calls(u$xml, seed_fns)
+      cols <- vapply(sc_same, function(s) {
+        if (!ast_is_inside_function(s) && ast_line(s, u$line_offset) == ln) ast_col(s) else Inf
+      }, numeric(1L))
+      if (any(cols < ast_col(nd))) return(TRUE)
+    }
+    FALSE
+  }
+
+  # Second pass: inspect top-level direct stochastic calls and higher-order invocations
   for (u in ctx$units) {
     calls <- ast_calls(u$xml, stochastic_fns)
     for (nd in calls) {
       if (ast_is_inside_function(nd)) next
       if (ast_is_inside_call(nd, wrapper_fns)) next
       ln <- ast_line(nd, u$line_offset)
-      if (ln > earliest_seed_line) next
-      # Same line: check if a seed call appears earlier on the same line
-      if (ln == earliest_seed_line) {
-        sc_same <- ast_calls(u$xml, seed_fns)
-        cols <- vapply(sc_same, function(s) {
-          if (!ast_is_inside_function(s) && ast_line(s, u$line_offset) == ln) ast_col(s) else Inf
-        }, numeric(1L))
-        if (any(cols < ast_col(nd))) next
-      }
+      if (is_seeded_at(u, nd, ln)) next
       fn <- ast_call_name(nd)
       findings[[length(findings) + 1L]] <- make_finding(
         ctx,
         line = ln,
         col = ast_col(nd),
         message = paste0(
-          "Stochastic call `", fn, "()` invoked without a preceding `set.seed()`, ",
-          "`withr::with_seed()`, or `RNGkind()` call."
+          "Stochastic call `", fn, "()` invoked without a preceding `set.seed()` or ",
+          "`withr::with_seed()` call."
         )
       )
+    }
+
+    # Catch higher-order invocations like lapply(1:5, rnorm) or do.call(rnorm, list(100))
+    for (hc in ast_calls(u$xml, hof_fns)) {
+      if (ast_is_inside_function(hc)) next
+      if (ast_is_inside_call(hc, wrapper_fns)) next
+      ln <- ast_line(hc, u$line_offset)
+      if (is_seeded_at(u, hc, ln)) next
+      hfn <- ast_call_name(hc)
+      hargs <- ast_call_args(hc)
+      fun_node <- if (hfn == "do.call") {
+        if (length(hargs) >= 1L) hargs[[1L]]$expr else NULL
+      } else if (hfn == "apply") {
+        if (length(hargs) >= 3L) hargs[[3L]]$expr else NULL
+      } else {
+        if (length(hargs) >= 2L) hargs[[2L]]$expr else NULL
+      }
+      if (is.null(fun_node)) next
+      # Match bare symbol (`rnorm`), ns-qualified (`stats::rnorm`), or string (`"rnorm"` in do.call)
+      fun_txt <- trimws(gsub("^['\"]|['\"]$", "", xml2::xml_text(fun_node)))
+      fun_base <- sub("^.*::", "", fun_txt)
+      if (fun_base %in% stochastic_fns && length(ast_fn_calls_in(fun_node)) == 0L) {
+        findings[[length(findings) + 1L]] <- make_finding(
+          ctx,
+          line = ln,
+          col = ast_col(hc),
+          message = paste0(
+            "Stochastic function `", fun_base, "` invoked via `", hfn,
+            "()` without a preceding `set.seed()` or `withr::with_seed()` call."
+          )
+        )
+      }
     }
   }
   findings
@@ -480,14 +519,43 @@ check_preprocessing_before_split <- function(ctx) {
       assigned <- ast_assigned_var(pc)
       assigned_root <- if (!is.na(assigned)) sub("(\\$|\\[).*", "", assigned) else NA_character_
 
+      # Walk enclosing mutate()/transmute()/within()/transform() calls so
+      # `df2 <- df |> mutate(x = scale(x)); initial_split(df2)` links df/df2 cleanly
+      enclosing_syms <- character(0)
+      enclosing_target_txt <- ""
+      anc_calls <- xml2::xml_find_all(pc, "ancestor::expr[expr[SYMBOL_FUNCTION_CALL]]")
+      for (ac in anc_calls) {
+        afn <- ast_call_name(ac)
+        if (!is.na(afn) && afn %in% c("mutate", "transmute", "within", "transform")) {
+          ac_assigned <- ast_assigned_var(ac)
+          if (!is.na(ac_assigned)) {
+            ac_root <- sub("(\\$|\\[).*", "", ac_assigned)
+            enclosing_syms <- c(enclosing_syms, ac_root)
+            enclosing_target_txt <- paste(enclosing_target_txt, ac_assigned)
+          }
+          ac_piped <- ast_piped_lhs(ac)
+          if (!is.null(ac_piped)) {
+            enclosing_syms <- c(enclosing_syms, ast_symbols(ac_piped))
+            enclosing_target_txt <- paste(enclosing_target_txt, xml2::xml_text(ac_piped))
+          } else {
+            ac_args <- ast_call_args(ac)
+            if (length(ac_args) >= 1L && is.na(ac_args[[1L]]$name) && !is.null(ac_args[[1L]]$expr)) {
+              enclosing_syms <- c(enclosing_syms, ast_symbols(ac_args[[1L]]$expr))
+              enclosing_target_txt <- paste(enclosing_target_txt, xml2::xml_text(ac_args[[1L]]$expr))
+            }
+          }
+        }
+      }
+
       # Skip if operating on an already-split training object or indexed by train/split
-      if (grepl("train|trn|_tr\\b|\\btr_|fold", target_txt, ignore.case = TRUE)) next
+      combined_target <- paste(target_txt, enclosing_target_txt)
+      if (grepl("train|trn|_tr\\b|\\btr_|fold", combined_target, ignore.case = TRUE)) next
       if (!is.na(assigned) && grepl("train|trn|_tr\\b|\\btr_", assigned, ignore.case = TRUE)) next
       # Skip if target uses row-subsetting with an index symbol (e.g. df[idx, ])
       if (grepl("\\[[^\\]]*,", target_txt) && grepl("idx|train|split|fold", target_txt, ignore.case = TRUE)) next
 
       # Check if any downstream split happens AFTER this preprocessing call on related data
-      related_syms <- unique(c(target_syms, assigned_root))
+      related_syms <- unique(c(target_syms, assigned_root, enclosing_syms))
       related_syms <- related_syms[!is.na(related_syms) & nzchar(related_syms)]
 
       leaked <- FALSE
@@ -766,11 +834,15 @@ check_silent_factor_drop <- function(ctx) {
   findings <- list()
 
   for (u in ctx$units) {
-    # (a) as.numeric(factor_var) without as.character()
+    # (a) as.numeric(factor_var) without as.character() (supports direct & piped calls)
     for (nc in ast_calls(u$xml, numeric_coercions)) {
       args <- ast_call_args(nc)
-      if (length(args) < 1L || is.null(args[[1L]]$expr)) next
-      arg_expr <- args[[1L]]$expr
+      arg_expr <- if (length(args) >= 1L && !is.null(args[[1L]]$expr)) {
+        args[[1L]]$expr
+      } else {
+        ast_piped_lhs(nc)
+      }
+      if (is.null(arg_expr)) next
       arg_calls <- ast_fn_calls_in(arg_expr)
       # Safe if wrapped in as.character() or levels()
       if (any(arg_calls %in% c("as.character", "levels"))) next
@@ -875,8 +947,12 @@ check_equality_on_float <- function(ctx) {
       op <- xml2::xml_text(ch[[2L]])
       rhs <- ch[[3L]]
 
-      # Skip string / NULL / NA comparisons
-      if (!inherits(xml2::xml_find_first(nd, ".//STR_CONST | .//NULL_CONST"), "xml_missing")) next
+      # Skip direct string / NULL / NA literal comparisons (without skipping df[["x"]] == 0.5)
+      is_direct_str_or_null <- function(e) {
+        !inherits(xml2::xml_find_first(e, "./STR_CONST | ./NULL_CONST"), "xml_missing") ||
+          xml2::xml_text(e) %in% c("NA", "NA_real_", "NA_integer_", "NA_character_")
+      }
+      if (is_direct_str_or_null(lhs) || is_direct_str_or_null(rhs)) next
 
       if (is_float_expr(lhs) || is_float_expr(rhs)) {
         ln <- ast_line(nd, u$line_offset)
@@ -1118,22 +1194,74 @@ check_short_logical_literal <- function(ctx) {
   arith_ops <- c("OP-PLUS", "OP-MINUS", "OP-STAR", "OP-SLASH", "OP-COLON", "OP-CARET", "LT", "GT", "LE", "GE")
 
   for (u in ctx$units) {
-    # Identify whether T or F is explicitly bound as a variable or formal parameter
-    bound_syms <- character(0)
-    formals <- xml2::xml_text(xml2::xml_find_all(u$xml, ".//SYMBOL_FORMALS"))
-    bound_syms <- c(bound_syms, intersect(formals, c("T", "F")))
-    assigns <- ast_assignments(u$xml, u$line_offset)
-    for (a in assigns) {
-      if (a$lhs %in% c("T", "F")) bound_syms <- c(bound_syms, a$lhs)
+    # Top-level bindings of T/F apply across the unit; function-local formals/assigns
+    # and for-loop variables are scoped strictly to their enclosing function/loop AST node!
+    top_bound <- character(0)
+    assign_nodes <- xml2::xml_find_all(
+      u$xml,
+      ".//*[self::expr or self::equal_assign][LEFT_ASSIGN or EQ_ASSIGN or RIGHT_ASSIGN]"
+    )
+    fn_bindings <- list()
+    for (an in assign_nodes) {
+      ch <- xml2::xml_children(an)
+      if (length(ch) != 3L) next
+      op <- xml2::xml_name(ch[[2L]])
+      lhs_txt <- if (op == "RIGHT_ASSIGN") xml2::xml_text(ch[[3L]]) else xml2::xml_text(ch[[1L]])
+      if (!(lhs_txt %in% c("T", "F"))) next
+      enc_fn <- xml2::xml_find_first(an, "ancestor::expr[FUNCTION or OP-LAMBDA][1]")
+      if (inherits(enc_fn, "xml_missing")) {
+        top_bound <- unique(c(top_bound, lhs_txt))
+      } else {
+        fp <- xml2::xml_path(enc_fn)
+        fn_bindings[[fp]] <- unique(c(fn_bindings[[fp]], lhs_txt))
+      }
     }
-    # Loop vars: for (T in ...)
-    for_vars <- xml2::xml_text(xml2::xml_find_all(u$xml, ".//forcond/SYMBOL"))
-    bound_syms <- unique(c(bound_syms, intersect(for_vars, c("T", "F"))))
+
+    # Formal parameters inside each function/lambda
+    fn_nodes <- xml2::xml_find_all(u$xml, ".//expr[FUNCTION or OP-LAMBDA]")
+    for (fn_nd in fn_nodes) {
+      fms <- xml2::xml_text(xml2::xml_find_all(fn_nd, "./SYMBOL_FORMALS"))
+      hits <- intersect(fms, c("T", "F"))
+      if (length(hits) > 0L) {
+        fp <- xml2::xml_path(fn_nd)
+        fn_bindings[[fp]] <- unique(c(fn_bindings[[fp]], hits))
+      }
+    }
+
+    # Loop variables scoped strictly to their enclosing `for` expression
+    loop_bindings <- list()
+    for_nodes <- xml2::xml_find_all(u$xml, ".//expr[FOR]")
+    for (fl in for_nodes) {
+      lv <- xml2::xml_text(xml2::xml_find_all(fl, "./forcond/SYMBOL"))
+      hits <- intersect(lv, c("T", "F"))
+      if (length(hits) > 0L) {
+        loop_bindings[[xml2::xml_path(fl)]] <- unique(c(loop_bindings[[xml2::xml_path(fl)]], hits))
+      }
+    }
+
+    is_lexically_bound <- function(sn, sym_txt) {
+      if (sym_txt %in% top_bound) return(TRUE)
+      if (length(fn_bindings) > 0L) {
+        anc_fns <- xml2::xml_find_all(sn, "ancestor::expr[FUNCTION or OP-LAMBDA]")
+        for (af in anc_fns) {
+          b <- fn_bindings[[xml2::xml_path(af)]]
+          if (!is.null(b) && sym_txt %in% b) return(TRUE)
+        }
+      }
+      if (length(loop_bindings) > 0L) {
+        anc_fors <- xml2::xml_find_all(sn, "ancestor::expr[FOR]")
+        for (al in anc_fors) {
+          b <- loop_bindings[[xml2::xml_path(al)]]
+          if (!is.null(b) && sym_txt %in% b) return(TRUE)
+        }
+      }
+      FALSE
+    }
 
     sym_nodes <- xml2::xml_find_all(u$xml, ".//SYMBOL[text() = 'T' or text() = 'F']")
     for (sn in sym_nodes) {
       txt <- xml2::xml_text(sn)
-      if (txt %in% bound_syms) next
+      if (is_lexically_bound(sn, txt)) next
       # Skip column/slot accesses like df$T or obj@F
       parent <- xml2::xml_parent(sn)
       if (!inherits(parent, "xml_missing")) {
@@ -1278,8 +1406,12 @@ check_silent_na_coercion <- function(ctx) {
     for (nd in ast_calls(u$xml, num_coercions)) {
       if (ast_is_inside_call(nd, "suppressWarnings")) next
       args <- ast_call_args(nd)
-      if (length(args) < 1L || is.null(args[[1L]]$expr)) next
-      arg_expr <- args[[1L]]$expr
+      arg_expr <- if (length(args) >= 1L && !is.null(args[[1L]]$expr)) {
+        args[[1L]]$expr
+      } else {
+        ast_piped_lhs(nd)
+      }
+      if (is.null(arg_expr)) next
       arg_calls <- ast_fn_calls_in(arg_expr)
       arg_syms <- ast_symbols(arg_expr)
       arg_txt <- xml2::xml_text(arg_expr)
@@ -1332,35 +1464,43 @@ check_stepwise_selection_unvalidated <- function(ctx) {
     "createFolds", "trainControl", "cv.glmnet", "boot", "bootstraps",
     "validate", "calibrate"
   )
+  train_tok_pat <- "(^|_)(train|trn|training|cv_fold|split|holdout)(_|$)"
 
-  has_validation <- FALSE
+  has_formal_validation <- FALSE
+  split_syms <- character(0)
+  model_train_flags <- list()
   for (u in ctx$units) {
     calls <- ast_fn_calls_in(u$xml)
     if (any(calls %in% val_fns)) {
-      has_validation <- TRUE
+      has_formal_validation <- TRUE
       break
     }
-    # Base R train/test split via sample()/sample.int() with nrow() or train/test var
+    # Base R train/test split via sample()/sample.int(): track split-associated symbols
     for (sc in ast_calls(u$xml, c("sample", "sample.int"))) {
       assigned <- ast_assigned_var(sc)
-      if ("nrow" %in% ast_fn_calls_in(sc) ||
-          (!is.na(assigned) && grepl("train|test|split|fold|holdout|idx", assigned, ignore.case = TRUE))) {
-        has_validation <- TRUE
-        break
+      if (!is.na(assigned) && grepl(train_tok_pat, assigned, ignore.case = TRUE)) {
+        split_syms <- unique(c(split_syms, assigned, ast_symbols(sc)))
       }
     }
-    if (has_validation) break
+    # Track models fitted on training splits (e.g., mod <- lm(y ~ ., data = train))
+    for (a in ast_assignments(u$xml, u$line_offset)) {
+      if (any(grepl(train_tok_pat, a$rhs_symbols, ignore.case = TRUE)) ||
+          length(intersect(a$rhs_symbols, split_syms)) > 0L) {
+        model_train_flags[[a$lhs_root]] <- TRUE
+      }
+    }
   }
 
-  if (has_validation) return(list())
+  if (has_formal_validation) return(list())
 
   findings <- list()
   for (u in ctx$units) {
     for (nd in ast_calls(u$xml, step_fns)) {
       fn <- ast_call_name(nd)
-      # Skip if operating on explicitly named training data
+      # Skip only if operating on an explicitly split/training object (word/token boundary)
       syms <- ast_symbols(nd)
-      if (any(grepl("train|trn|fold|split", syms, ignore.case = TRUE))) next
+      if (any(grepl(train_tok_pat, syms, ignore.case = TRUE))) next
+      if (any(syms %in% names(model_train_flags))) next
       ln <- ast_line(nd, u$line_offset)
       findings[[length(findings) + 1L]] <- make_finding(
         ctx, ln, ast_col(nd),
@@ -1386,42 +1526,93 @@ check_in_sample_prediction_eval <- function(ctx) {
   model_data <- list()
   in_sample_preds <- list()
 
+  resolve_model_train_df <- function(mnode) {
+    margs <- ast_call_args(mnode)
+    piped <- ast_piped_lhs(mnode)
+    d_arg <- Filter(function(x) identical(x$name, "data"), margs)
+    d_node <- if (length(d_arg) > 0L) {
+      d_arg[[1L]]$expr
+    } else if (length(margs) >= 2L && is.na(margs[[2L]]$name)) {
+      margs[[2L]]$expr
+    } else {
+      NULL
+    }
+    # Resolve R 4.2+ pipe placeholder (`df |> lm(y ~ x, data = _)`) or magrittr `.`
+    if (!is.null(d_node) && !is.null(piped)) {
+      d_txt <- trimws(xml2::xml_text(d_node))
+      if (d_txt %in% c("_", ".")) {
+        d_node <- piped
+      }
+    } else if (is.null(d_node) && !is.null(piped)) {
+      d_node <- piped
+    }
+    d_syms <- if (!is.null(d_node)) ast_symbols(d_node) else character(0)
+    if (length(d_syms) >= 1L) d_syms[1L] else NA_character_
+  }
+
+  # Resolve (model_name, newdata_node) for direct AND piped predict()/fitted() calls,
+  # properly recognizing positional `predict(fit, test_df)` as out-of-sample!
+  classify_predict_call <- function(pnode) {
+    pfn <- ast_call_name(pnode)
+    pargs <- ast_call_args(pnode)
+    piped <- ast_piped_lhs(pnode)
+    pos_args <- Filter(function(x) is.na(x$name), pargs)
+    nd_named <- Filter(function(x) identical(x$name, "newdata"), pargs)
+
+    if (!is.null(piped)) {
+      mod_node <- piped
+      nd_node <- if (length(nd_named) > 0L) {
+        nd_named[[1L]]$expr
+      } else if (length(pos_args) >= 1L) {
+        pos_args[[1L]]$expr
+      } else {
+        NULL
+      }
+    } else {
+      mod_node <- if (length(pargs) >= 1L) pargs[[1L]]$expr else NULL
+      nd_node <- if (length(nd_named) > 0L) {
+        nd_named[[1L]]$expr
+      } else if (length(pos_args) >= 2L) {
+        pos_args[[2L]]$expr
+      } else {
+        NULL
+      }
+    }
+
+    if (is.null(mod_node)) return(list(in_sample = FALSE))
+    mod_syms <- ast_symbols(mod_node)
+    mod_nm <- if (length(mod_syms) == 1L) mod_syms[1L] else NA_character_
+    if (is.na(mod_nm) || !(mod_nm %in% names(model_data))) return(list(in_sample = FALSE))
+
+    train_df <- model_data[[mod_nm]]
+    if (pfn == "fitted" || is.null(nd_node)) {
+      return(list(in_sample = TRUE, model = mod_nm, data = train_df))
+    }
+    nd_syms <- ast_symbols(nd_node)
+    if (length(nd_syms) == 1L && identical(nd_syms[1L], train_df)) {
+      return(list(in_sample = TRUE, model = mod_nm, data = train_df))
+    }
+    list(in_sample = FALSE)
+  }
+
   for (u in ctx$units) {
     assigns <- ast_assignments(u$xml, u$line_offset)
     for (a in assigns) {
       # Track model -> training data symbol
       mc <- ast_calls(a$rhs_node, fit_fns)
       if (length(mc) >= 1L) {
-        margs <- ast_call_args(mc[[1L]])
-        d_arg <- Filter(function(x) identical(x$name, "data"), margs)
-        d_node <- if (length(d_arg) > 0L) d_arg[[1L]]$expr else if (length(margs) >= 2L && is.na(margs[[2L]]$name)) margs[[2L]]$expr else NULL
-        d_syms <- if (!is.null(d_node)) ast_symbols(d_node) else character(0)
-        if (length(d_syms) >= 1L) {
-          model_data[[a$lhs_root]] <- d_syms[1L]
+        train_sym <- resolve_model_train_df(mc[[1L]])
+        if (!is.na(train_sym)) {
+          model_data[[a$lhs_root]] <- train_sym
         }
       }
 
       # Track predictions computed on same training data
       pc <- ast_calls(a$rhs_node, c("predict", "fitted"))
       if (length(pc) >= 1L) {
-        pnode <- pc[[1L]]
-        pfn <- ast_call_name(pnode)
-        pargs <- ast_call_args(pnode)
-        if (length(pargs) >= 1L && !is.null(pargs[[1L]]$expr)) {
-          mod_syms <- ast_symbols(pargs[[1L]]$expr)
-          mod_nm <- if (length(mod_syms) == 1L) mod_syms[1L] else NA_character_
-          train_df <- if (!is.na(mod_nm) && mod_nm %in% names(model_data)) model_data[[mod_nm]] else NA_character_
-          if (!is.na(train_df)) {
-            nd_arg <- Filter(function(x) identical(x$name, "newdata"), pargs)
-            if (pfn == "fitted" || length(nd_arg) == 0L) {
-              in_sample_preds[[a$lhs_root]] <- list(model = mod_nm, data = train_df, line = a$line)
-            } else if (!is.null(nd_arg[[1L]]$expr)) {
-              nd_syms <- ast_symbols(nd_arg[[1L]]$expr)
-              if (length(nd_syms) == 1L && identical(nd_syms[1L], train_df)) {
-                in_sample_preds[[a$lhs_root]] <- list(model = mod_nm, data = train_df, line = a$line)
-              }
-            }
-          }
+        cl <- classify_predict_call(pc[[1L]])
+        if (isTRUE(cl$in_sample)) {
+          in_sample_preds[[a$lhs_root]] <- list(model = cl$model, data = cl$data, line = a$line)
         }
       }
     }
@@ -1430,18 +1621,8 @@ check_in_sample_prediction_eval <- function(ctx) {
   is_inline_in_sample_predict <- function(node) {
     pcs <- ast_calls(node, c("predict", "fitted"))
     for (pnode in pcs) {
-      pfn <- ast_call_name(pnode)
-      pargs <- ast_call_args(pnode)
-      if (length(pargs) < 1L || is.null(pargs[[1L]]$expr)) next
-      mod_syms <- ast_symbols(pargs[[1L]]$expr)
-      if (length(mod_syms) != 1L || !(mod_syms[1L] %in% names(model_data))) next
-      train_df <- model_data[[mod_syms[1L]]]
-      nd_arg <- Filter(function(x) identical(x$name, "newdata"), pargs)
-      if (pfn == "fitted" || length(nd_arg) == 0L) return(train_df)
-      if (!is.null(nd_arg[[1L]]$expr)) {
-        nd_syms <- ast_symbols(nd_arg[[1L]]$expr)
-        if (length(nd_syms) == 1L && identical(nd_syms[1L], train_df)) return(train_df)
-      }
+      cl <- classify_predict_call(pnode)
+      if (isTRUE(cl$in_sample)) return(cl$data)
     }
     NA_character_
   }
@@ -1528,12 +1709,32 @@ check_unverified_merge_cardinality <- function(ctx) {
       assigned_root <- if (!is.na(assigned)) sub("(\\$|\\[).*", "", assigned) else NA_character_
 
       # Check whether a later line verifies row count / uniqueness on the merged object
+      # (or, for unassigned/inline joins, directly wraps or pipes the join into a verify call)
       is_verified <- FALSE
-      for (v in verifies) {
-        if (v$line >= ln) {
-          if (is.na(assigned_root) || assigned_root %in% v$symbols) {
+      if (!is.na(assigned_root)) {
+        for (v in verifies) {
+          if (v$line >= ln && assigned_root %in% v$symbols) {
             is_verified <- TRUE
             break
+          }
+        }
+      } else {
+        if (ast_is_inside_call(nd, verify_fns)) {
+          is_verified <- TRUE
+        } else {
+          # Check if directly piped into a verify call: merge(...) |> nrow()
+          p_node <- xml2::xml_parent(nd)
+          if (!inherits(p_node, "xml_missing")) {
+            pch <- xml2::xml_children(p_node)
+            if (length(pch) == 3L &&
+                (xml2::xml_name(pch[[2L]]) == "PIPE" ||
+                 (xml2::xml_name(pch[[2L]]) == "SPECIAL" && xml2::xml_text(pch[[2L]]) == "%>%")) &&
+                identical(xml2::xml_path(pch[[1L]]), xml2::xml_path(nd))) {
+              rhs_fn <- ast_call_name(pch[[3L]])
+              if (!is.na(rhs_fn) && rhs_fn %in% verify_fns) {
+                is_verified <- TRUE
+              }
+            }
           }
         }
       }
@@ -1553,6 +1754,51 @@ check_unverified_merge_cardinality <- function(ctx) {
 
 # 19. missing_drop_false_matrix
 check_missing_drop_false_matrix <- function(ctx) {
+  is_const_multi_slice <- function(expr_nd) {
+    if (is.null(expr_nd) || xml2::xml_name(expr_nd) != "expr") return(FALSE)
+    # Constant numeric range `1:3` where BOTH endpoints are numeric literals with |b - a| >= 1
+    if (!inherits(xml2::xml_find_first(expr_nd, "./OP-COLON"), "xml_missing")) {
+      ech <- xml2::xml_children(expr_nd)
+      if (length(ech) == 3L) {
+        a_nd <- xml2::xml_find_first(ech[[1L]], "./NUM_CONST")
+        b_nd <- xml2::xml_find_first(ech[[3L]], "./NUM_CONST")
+        if (!inherits(a_nd, "xml_missing") && !inherits(b_nd, "xml_missing")) {
+          a_val <- suppressWarnings(as.numeric(sub("L$", "", xml2::xml_text(a_nd))))
+          b_val <- suppressWarnings(as.numeric(sub("L$", "", xml2::xml_text(b_nd))))
+          if (is.finite(a_val) && is.finite(b_val) && abs(b_val - a_val) >= 1) {
+            return(TRUE)
+          }
+        }
+      }
+      return(FALSE)
+    }
+    # Explicit multi-element c(a, b, ...)
+    c_calls <- ast_calls(expr_nd, "c")
+    if (length(c_calls) >= 1L && identical(xml2::xml_path(c_calls[[1L]]), xml2::xml_path(expr_nd))) {
+      if (length(ast_call_args(c_calls[[1L]])) >= 2L) return(TRUE)
+    }
+    FALSE
+  }
+
+  is_logical_filter <- function(expr_nd) {
+    if (is.null(expr_nd) || xml2::xml_name(expr_nd) != "expr") return(FALSE)
+    if (!inherits(xml2::xml_find_first(
+      expr_nd,
+      ".//GT | .//LT | .//GE | .//LE | .//EQ | .//NE | .//AND | .//OR | .//OP-EXCLAMATION | .//SPECIAL"
+    ), "xml_missing")) {
+      return(TRUE)
+    }
+    any(ast_fn_calls_in(expr_nd) %in% c("which", "is.na", "complete.cases", "grepl"))
+  }
+
+  is_single_num_literal <- function(expr_nd) {
+    if (is.null(expr_nd) || xml2::xml_name(expr_nd) != "expr") return(FALSE)
+    ech <- xml2::xml_children(expr_nd)
+    length(ech) == 1L && xml2::xml_name(ech[[1L]]) == "NUM_CONST"
+  }
+
+  df_like_names <- c("df", "dat", "data", "tbl", "sub", "train", "test", "d")
+
   findings <- list()
   for (u in ctx$units) {
     # 2D subsetting expressions inside reusable function()/lambda definitions
@@ -1579,27 +1825,63 @@ check_missing_drop_false_matrix <- function(ctx) {
       sub_syms <- xml2::xml_text(ch[ch_names == "SYMBOL_SUB"])
       if ("drop" %in% sub_syms) next
 
-      # Inspect token immediately after the first comma (column index)
+      lb_pos <- which(ch_names == "OP-LEFT-BRACKET")[1L]
       comma_pos <- which(ch_names == "OP-COMMA")[1L]
-      if (is.na(comma_pos) || comma_pos >= length(ch)) next
-      col_node <- ch[[comma_pos + 1L]]
-      col_name <- ch_names[comma_pos + 1L]
-      # Empty column index (e.g. df[idx, ]) does not collapse columns to a vector
-      if (col_name %in% c("OP-RIGHT-BRACKET", "OP-COMMA")) next
+      if (is.na(lb_pos) || is.na(comma_pos) || comma_pos >= length(ch)) next
 
-      # Skip explicit multi-column constant slices like 1:3 or c("a", "b")
-      if (col_name == "expr") {
-        if (!inherits(xml2::xml_find_first(col_node, "./OP-COLON"), "xml_missing")) next
-        c_calls <- ast_calls(col_node, "c")
-        if (length(c_calls) >= 1L && length(ast_call_args(c_calls[[1L]])) >= 2L) next
+      obj_sym <- if (lb_pos >= 2L) trimws(xml2::xml_text(ch[[1L]])) else ""
+      row_empty <- (comma_pos == lb_pos + 1L)
+      row_node <- if (!row_empty) ch[[lb_pos + 1L]] else NULL
+
+      col_name <- ch_names[comma_pos + 1L]
+      col_empty <- col_name %in% c("OP-RIGHT-BRACKET", "OP-COMMA")
+      col_node <- if (!col_empty) ch[[comma_pos + 1L]] else NULL
+
+      should_flag <- FALSE
+      slice_kind <- "column"
+
+      if (row_empty && !col_empty) {
+        # Column slice `X[, j]` or `X[, 1:p]`: drops matrix/df to vector when 1 col selected
+        if (!is_const_multi_slice(col_node)) {
+          should_flag <- TRUE
+          slice_kind <- "column"
+        }
+      } else if (!row_empty && col_empty) {
+        # Row slice `X[1, ]`: drops 2D matrix to 1D vector when 1 row selected
+        if (is_single_num_literal(row_node)) {
+          should_flag <- TRUE
+          slice_kind <- "row"
+        } else if (!is_const_multi_slice(row_node) && !is_logical_filter(row_node) &&
+                   !(tolower(obj_sym) %in% df_like_names) &&
+                   !grepl("^(idx|keep|rows|sel|mask|ok)$", xml2::xml_text(row_node), ignore.case = TRUE)) {
+          should_flag <- TRUE
+          slice_kind <- "row"
+        }
+      } else if (!row_empty && !col_empty) {
+        # Both row and column supplied: ignore scalar element lookups (`m[i, 1]`,
+        # `coef(summary(fit))[2, 4]`, `df[1, "col"]`), flag only when one axis is a
+        # multi-element slice (`1:n` or `c(...)`) and the other can collapse to length 1
+        row_is_range <- !inherits(xml2::xml_find_first(row_node, "./OP-COLON"), "xml_missing") ||
+          is_const_multi_slice(row_node)
+        col_is_range <- !inherits(xml2::xml_find_first(col_node, "./OP-COLON"), "xml_missing") ||
+          is_const_multi_slice(col_node)
+        if (row_is_range && !is_const_multi_slice(col_node)) {
+          should_flag <- TRUE
+          slice_kind <- "column"
+        } else if (col_is_range && !is_const_multi_slice(row_node)) {
+          should_flag <- TRUE
+          slice_kind <- "row"
+        }
       }
+
+      if (!should_flag) next
 
       ln <- ast_line(nd, u$line_offset)
       findings[[length(findings) + 1L]] <- make_finding(
         ctx, ln, ast_col(nd),
         paste0(
-          "2D column subsetting `", xml2::xml_text(nd), "` inside a function omits `drop = FALSE`; ",
-          "selecting a single column silently collapses matrices/data frames into a vector."
+          "2D ", slice_kind, " subsetting `", xml2::xml_text(nd), "` inside a function omits `drop = FALSE`; ",
+          "selecting a single ", slice_kind, " silently collapses matrices/arrays into a 1D vector."
         )
       )
     }
@@ -1609,30 +1891,80 @@ check_missing_drop_false_matrix <- function(ctx) {
 
 # 20. implicit_na_rm_masking
 check_implicit_na_rm_masking <- function(ctx) {
-  agg_fns <- c("mean", "sd", "var", "median", "sum")
+  agg_fns <- c(
+    "mean", "sd", "var", "median", "sum", "quantile", "min", "max",
+    "colMeans", "rowMeans", "colSums", "rowSums"
+  )
   na_guard_fns <- c(
     "is.na", "anyNA", "complete.cases", "na.omit", "na.exclude",
     "drop_na", "na.fail", "n_miss", "miss_var_summary"
   )
 
-  # If any missingness inspection or filtering exists in the file/document, pass cleanly
+  # Collect missingness inspection/filtering calls with line numbers and symbols
+  guards <- list()
   for (u in ctx$units) {
-    if (any(ast_fn_calls_in(u$xml) %in% na_guard_fns)) {
-      return(list())
+    for (gc in ast_calls(u$xml, na_guard_fns)) {
+      guards[[length(guards) + 1L]] <- list(
+        line = ast_line(gc, u$line_offset),
+        symbols = ast_symbols(gc)
+      )
     }
+  }
+
+  is_true_literal <- function(txt) {
+    trimws(txt) %in% c("TRUE", "T")
   }
 
   findings <- list()
   for (u in ctx$units) {
     for (nd in ast_calls(u$xml, agg_fns)) {
+      fn <- ast_call_name(nd)
       args <- ast_call_args(nd)
       narm_arg <- Filter(function(a) identical(a$name, "na.rm"), args)
-      if (length(narm_arg) == 0L) next
-      val_txt <- trimws(narm_arg[[1L]]$text)
-      if (!(val_txt %in% c("TRUE", "T"))) next
+      val_txt <- NA_character_
 
-      fn <- ast_call_name(nd)
+      if (length(narm_arg) > 0L) {
+        if (is_true_literal(narm_arg[[1L]]$text)) {
+          val_txt <- trimws(narm_arg[[1L]]$text)
+        }
+      } else {
+        # Positional na.rm arguments: mean(x, trim, na.rm), sd(x, na.rm),
+        # median(x, na.rm), var(x, y, na.rm), colMeans/rowMeans/colSums/rowSums(x, na.rm)
+        pos_args <- Filter(function(a) is.na(a$name), args)
+        pos_idx <- switch(
+          fn,
+          mean = 3L,
+          sd = 2L,
+          median = 2L,
+          var = 3L,
+          colMeans = 2L,
+          rowMeans = 2L,
+          colSums = 2L,
+          rowSums = 2L,
+          NA_integer_
+        )
+        if (!is.na(pos_idx) && length(pos_args) >= pos_idx && is_true_literal(pos_args[[pos_idx]]$text)) {
+          val_txt <- trimws(pos_args[[pos_idx]]$text)
+        }
+      }
+
+      if (is.na(val_txt)) next
+
       ln <- ast_line(nd, u$line_offset)
+      # Collect target symbols from first argument (or piped LHS)
+      target_expr <- if (length(args) >= 1L && !is.null(args[[1L]]$expr)) args[[1L]]$expr else ast_piped_lhs(nd)
+      target_syms <- if (!is.null(target_expr)) ast_symbols(target_expr) else character(0)
+
+      # Exempt only if a missingness guard occurs on/before this line OR targets the same variable
+      has_guard <- FALSE
+      for (g in guards) {
+        if (g$line <= ln || (length(target_syms) > 0L && length(intersect(target_syms, g$symbols)) > 0L)) {
+          has_guard <- TRUE
+          break
+        }
+      }
+      if (has_guard) next
+
       findings[[length(findings) + 1L]] <- make_finding(
         ctx, ln, ast_col(nd),
         paste0(

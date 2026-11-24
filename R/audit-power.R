@@ -67,19 +67,28 @@ audit_power_curve <- function(dgp,
                               mc_alpha = 0.01) {
   if (!is.function(dgp)) rlang::abort("`dgp` must be a function taking an `effect` scalar.")
   if (!is.function(test_fn)) rlang::abort("`test_fn` must be a function taking a simulated dataset.")
-  if (!is.numeric(effect_grid) || length(effect_grid) < 2L || any(!is.finite(effect_grid))) {
+  if (!is.numeric(effect_grid) || any(!is.finite(effect_grid))) {
     rlang::abort("`effect_grid` must be a finite numeric vector of length >= 2.")
+  }
+  effect_grid <- sort(unique(as.numeric(effect_grid)))
+  if (length(effect_grid) < 2L) {
+    rlang::abort("`effect_grid` must contain at least 2 distinct finite effect values.")
   }
   n_sim <- as.integer(n_sim)[1L]
   if (is.na(n_sim) || n_sim < 10L) rlang::abort("`n_sim` must be an integer >= 10.")
-  if (!is.numeric(alpha) || length(alpha) != 1L || alpha <= 0 || alpha >= 1) {
-    rlang::abort("`alpha` must be strictly between 0 and 1.")
+  if (!is.numeric(alpha) || length(alpha) != 1L || !is.finite(alpha) || alpha <= 0 || alpha >= 1) {
+    rlang::abort("`alpha` must be a finite numeric scalar strictly between 0 and 1.")
   }
-  if (!is.numeric(target_power) || length(target_power) != 1L || target_power <= 0 || target_power >= 1) {
-    rlang::abort("`target_power` must be strictly between 0 and 1.")
+  if (!is.numeric(target_power) || length(target_power) != 1L || !is.finite(target_power) || target_power <= 0 || target_power >= 1) {
+    rlang::abort("`target_power` must be a finite numeric scalar strictly between 0 and 1.")
+  }
+  if (!is.numeric(mc_alpha) || length(mc_alpha) != 1L || !is.finite(mc_alpha) || mc_alpha <= 0 || mc_alpha >= 1) {
+    rlang::abort("`mc_alpha` must be a finite numeric scalar strictly between 0 and 1.")
+  }
+  if (!is.null(target_effect) && (!is.numeric(target_effect) || length(target_effect) != 1L || !is.finite(target_effect))) {
+    rlang::abort("`target_effect` must be NULL or a finite numeric scalar.")
   }
 
-  effect_grid <- sort(unique(as.numeric(effect_grid)))
   withr::local_seed(
     as.integer(seed)[1L],
     .rng_kind = "Mersenne-Twister",
@@ -87,24 +96,34 @@ audit_power_curve <- function(dgp,
     .rng_sample_kind = "Rejection"
   )
 
+  check_pval <- function(pv) {
+    p <- suppressWarnings(as.numeric(pv)[1L])
+    if (!is.finite(p) || p < 0 || p > 1) return(NA)
+    p <= alpha
+  }
+
   extract_reject <- function(res) {
     if (is.logical(res) && length(res) == 1L) return(res)
-    if (is.numeric(res) && length(res) == 1L) return(res <= alpha)
-    if (inherits(res, "htest")) return(as.numeric(res$p.value)[1L] <= alpha)
+    if (is.numeric(res) && length(res) == 1L) return(check_pval(res))
+    if (inherits(res, "htest")) return(check_pval(res$p.value))
     if (is.list(res) && !inherits(res, c("lm", "glm", "lmerMod", "glmerMod"))) {
       pv <- res$p_value %||% res$p.value
-      if (!is.null(pv)) return(as.numeric(pv)[1L] <= alpha)
-      if (!is.null(res$reject)) return(isTRUE(res$reject))
+      if (!is.null(pv)) return(check_pval(pv))
+      if ("reject" %in% names(res)) {
+        rj <- res$reject
+        if (is.logical(rj) && length(rj) == 1L) return(rj)
+        return(NA)
+      }
     }
     norm <- normalize_estimator_result(res, alpha = alpha)
     pvs <- norm$p_value
     if (!is.null(param)) {
       if (!(param %in% names(pvs))) rlang::abort(paste0("Parameter `", param, "` not found in test output."))
-      return(as.numeric(pvs[[param]]) <= alpha)
+      return(check_pval(pvs[[param]]))
     }
     non_int <- setdiff(names(pvs), "(Intercept)")
     pick <- if (length(non_int) > 0L) non_int[1L] else names(pvs)[1L]
-    as.numeric(pvs[[pick]]) <= alpha
+    check_pval(pvs[[pick]])
   }
 
   rows <- vector("list", length(effect_grid))
@@ -236,20 +255,32 @@ audit_power_curve <- function(dgp,
     }
   }
 
-  # 4. Estimate Minimum Detectable Effect (MDE) via linear interpolation on positive branch
+  # 4. Estimate Minimum Detectable Effect (MDE) via linear interpolation
+  # Use non-negative branch when available; fall back to |effect| on negative-only grids
   mde <- NA_real_
   pos_c <- curve[curve$effect >= 0 & is.finite(curve$power), , drop = FALSE]
-  if (nrow(pos_c) >= 2L) {
-    above <- which(pos_c$power >= target_power)
+  interp_branch <- if (nrow(pos_c) >= 2L) {
+    data.frame(mag = pos_c$effect, power = pos_c$power)
+  } else {
+    neg_c <- curve[curve$effect <= 0 & is.finite(curve$power), , drop = FALSE]
+    if (nrow(neg_c) >= 2L) {
+      neg_c <- neg_c[order(abs(neg_c$effect)), , drop = FALSE]
+      data.frame(mag = abs(neg_c$effect), power = neg_c$power)
+    } else {
+      NULL
+    }
+  }
+  if (!is.null(interp_branch) && nrow(interp_branch) >= 2L) {
+    above <- which(interp_branch$power >= target_power)
     if (length(above) >= 1L) {
       i_hi <- above[1L]
       if (i_hi == 1L) {
-        mde <- pos_c$effect[1L]
+        mde <- interp_branch$mag[1L]
       } else {
-        p_lo <- pos_c$power[i_hi - 1L]
-        p_hi <- pos_c$power[i_hi]
-        e_lo <- pos_c$effect[i_hi - 1L]
-        e_hi <- pos_c$effect[i_hi]
+        p_lo <- interp_branch$power[i_hi - 1L]
+        p_hi <- interp_branch$power[i_hi]
+        e_lo <- interp_branch$mag[i_hi - 1L]
+        e_hi <- interp_branch$mag[i_hi]
         mde <- if (p_hi > p_lo) e_lo + (target_power - p_lo) / (p_hi - p_lo) * (e_hi - e_lo) else e_hi
       }
     }
