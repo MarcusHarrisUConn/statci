@@ -1,0 +1,13 @@
+pandoc: 3.8.3
+pkgdown: 2.2.1
+pkgdown_sha: ~
+articles:
+  calibration-and-robustness: calibration-and-robustness.html
+  getting-started: getting-started.html
+  github-actions-ci: github-actions-ci.html
+  manuscript-auditing: manuscript-auditing.html
+  multiverse-and-pr-diffs: multiverse-and-pr-diffs.html
+last_built: 2026-11-24T21:43Z
+urls:
+  reference: https://marcusharrisphd.com/statci/reference
+  article: https://marcusharrisphd.com/statci/articles
